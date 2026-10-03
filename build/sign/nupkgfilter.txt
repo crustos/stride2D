@@ -1,4 +1,0 @@
-**/Stride*.exe
-**/packageinstall.exe
-**/packageinstall.dll
-**/*.vsix
