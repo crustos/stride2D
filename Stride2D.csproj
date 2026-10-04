@@ -1,0 +1,46 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    The ONE list of what the Stride2D runtime is. The .NET build (the reference) compiles it; tools/player_build.py reads the same list and
+    translates it, with the game's scripts, to a single C file. Items marked CBuild="false" are .NET-only (the native bindings, which the C
+    build replaces with the generated C flavor). No NuGet packages: nothing here depends on anything.
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>Stride2D</RootNamespace>
+    <Nullable>annotations</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <NuGetAudit>false</NuGetAudit>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+  </PropertyGroup>
+
+  <ItemGroup Label="Physics core">
+    <Compile Include="src\physics\MaxInstancesAttribute.cs" />
+    <Compile Include="src\physics\Arena.cs" />
+    <Compile Include="src\physics\Pose2D.cs" />
+    <Compile Include="src\physics\Collider2DGeometry.cs" />
+    <Compile Include="src\physics\HandleTable.cs" />
+    <Compile Include="src\physics\TriggerSet.cs" />
+    <Compile Include="src\physics\BodyRecord.cs" />
+    <Compile Include="src\physics\JointRecord.cs" />
+    <Compile Include="src\physics\Registry2D.cs" />
+    <Compile Include="src\physics\SimCore2D.cs" />
+  </ItemGroup>
+
+  <ItemGroup Label="The runtime">
+    <Compile Include="src\core\CoreLimits.cs" />
+    <Compile Include="src\core\ScriptAttribute.cs" />
+    <Compile Include="src\core\Node.cs" />
+    <Compile Include="src\core\Component.cs" />
+    <Compile Include="src\core\Rigidbody2D.cs" />
+    <Compile Include="src\core\Collider2D.cs" />
+    <Compile Include="src\core\World2D.cs" />
+    <Compile Include="src\core\SpriteRenderer2D.cs" />
+    <Compile Include="src\core\Renderer2D.cs" />
+    <Compile Include="src\core\Scene2D.cs" />
+  </ItemGroup>
+
+</Project>
