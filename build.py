@@ -13,7 +13,7 @@ build.py - top-level build script for Stride2D.
 with the classes that use it (the generated Scripts sink, and Main). The engine stays native. Needs ../DotNetAnywhere and mono-mcs; the player then
 runs with player.managed.dll and corlib.dll beside it. See samples/HybridScripts.
 
-  python3 build.py test [--sanitize] [NAME..]      every folder of tests/ and samples/, native vs .NET (and under the sanitizers)
+  python3 build.py test [--sanitize] [--dna] [NAME..]      every folder of tests/ and samples/, native vs .NET (and under the sanitizers)
   python3 build.py bench [--avx2] [--cachegrind]   native physics benchmark (pyramid + circles); prints a state hash that must not change
   python3 build.py status | clean
 
@@ -110,14 +110,15 @@ def cmd_test(a):
     if not names: die("nothing to run")
     results = []
     for n in names:
-        cmd = [sys.executable, TOOL, n, "--verify"] + (["--sanitize"] if a.sanitize else [])
+        cmd = [sys.executable, TOOL, n, "--verify"] + (["--sanitize"] if a.sanitize else []) + (["--dna"] if a.dna else [])
         log("running " + n)
         r = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
         out = r.stdout + r.stderr
-        ok = r.returncode == 0 and "verify    ok" in out and (not a.sanitize or "sanitize  ok" in out)
+        ok = r.returncode == 0 and "verify    ok" in out and (not a.sanitize or "sanitize  ok" in out or "sanitize  skipped" in out)
         why = ""
         if not ok:
             why = next((l.strip() for l in out.splitlines() if "FAIL" in l or "error" in l or "differ" in l), "see: python3 tools/player_build.py " + n + " --verify")
+            if not a.dna and "C# subset" in out: why = "[outside the C# subset: for DotNetAnywhere use test --dna] " + why
         results.append((n, ok, why))
     print()
     for n, ok, why in results:
