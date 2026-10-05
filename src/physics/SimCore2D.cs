@@ -119,8 +119,11 @@ internal sealed class SimCore2D
     public float GravityY => _gravityY;
     public int WorkerCount => _workers;
 
-    /// <summary>No live bodies or colliders, so the native world could be handed to someone else.</summary>
-    public bool IsIdle => !_inStep && Registry.BodyCount == 0 && Registry.ColliderCount == 0;
+    /// <summary>Holders of the native world that are not registered bodies or colliders (terrain layers): the world stays while any holds it.</summary>
+    public int Pins;
+
+    /// <summary>No live bodies or colliders, and nobody pinning the world, so the native world could be handed to someone else.</summary>
+    public bool IsIdle => !_inStep && Registry.BodyCount == 0 && Registry.ColliderCount == 0 && Pins == 0;
 
     public void SetGravity(float x, float y)
     {
