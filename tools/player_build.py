@@ -10,9 +10,6 @@ GAME_DIR holds the game's C# files: scripts (classes marked [Script]) and one cl
 --check   stop after step 2 and print what is outside the C# subset as `File.cs(line,col): error CCS0001: ...`
 --verify  also run the game on .NET (the reference) and require the same output
 --static  link a fully static executable (no loader, no libc.so)
---dna     a class the C build cannot translate (a script that uses a lambda, try/catch, LINQ ...) runs on DotNetAnywhere instead of being refused,
-          together with the classes that use it; the engine stays native and the managed side reaches its objects by address. Needs DotNetAnywhere
-          (../DotNetAnywhere) and mono-mcs. The player then needs player.managed.dll and corlib.dll beside it.
 """
 import argparse, os, re, shutil, subprocess, sys
 
@@ -38,14 +35,29 @@ def ccs2c_path():
     return os.path.join(home, "crust", "ccs2c.py")
 
 
-def runtime_files():
-    """The runtime's C# files, from Stride2D.csproj (the one list). CBuild="false" items are left out."""
+FEATURES = {"terrain": "Stride2D.Terrain", "destruction": "Stride2D.Destruction"}     # a Feature="x" item of Stride2D.csproj is in a game that mentions this namespace
+
+
+def runtime_files(game=None):
+    """The runtime's C# files, from Stride2D.csproj (the one list). CBuild="false" items are left out; Feature="x" items
+    are in only if one of the game's files mentions the feature's namespace."""
     proj = os.path.join(ROOT, "Stride2D.csproj")
     text = open(proj, encoding="utf-8").read()
+    used = set()
+    for name, ns in FEATURES.items():
+        for p in (game or []):
+            if ns in open(p, encoding="utf-8-sig").read():
+                used.add(name)
+                break
     out = []
     for m in re.finditer(r'<Compile\s+Include="([^"]+)"([^>]*)/>', text):
-        if 'CBuild="false"' not in m.group(2):
-            out.append(os.path.normpath(os.path.join(ROOT, m.group(1).replace("\\", os.sep))))
+        attrs = m.group(2)
+        if 'CBuild="false"' in attrs:
+            continue
+        f = re.search(r'Feature="(\w+)"', attrs)
+        if f and f.group(1) not in used:
+            continue
+        out.append(os.path.normpath(os.path.join(ROOT, m.group(1).replace("\\", os.sep))))
     return out
 
 
@@ -97,13 +109,7 @@ def generate_only(game, out_dir):
     gen_scripts.generate(os.path.join(gen, "Scripts.g.cs"), game)
 
 
-def ccs2c_module():
-    sys.path.insert(0, os.path.dirname(ccs2c_path()))
-    import ccs2c
-    return ccs2c
-
-
-def translate(game, out_dir, main_class, dna=False):
+def translate(game, out_dir, main_class):
     gen = os.path.join(out_dir, "generated")
     inc = os.path.join(gen, "include")
     shutil.rmtree(gen, ignore_errors=True)
@@ -117,52 +123,14 @@ def translate(game, out_dir, main_class, dna=False):
     shutil.rmtree(c_dir, ignore_errors=True)
     # the C flavor of the bindings holds no code (extern members with [Cpp] templates), so it is an ordinary input
     bindings = [os.path.join(gen, "bindings", "c", n) for n in sorted(os.listdir(os.path.join(gen, "bindings", "c")))]
-    cmd = ([sys.executable, ccs2c_path()] + bindings + runtime_files() + game + [sink]
-           + ["--main=" + main_class, "--name=player", "--convert=" + c_dir, "--c"] + (["--dna"] if dna else []))
+    cmd = ([sys.executable, ccs2c_path()] + bindings + runtime_files(game) + game + [sink]
+           + ["--main=" + main_class, "--name=player", "--convert=" + c_dir, "--c"])
     r = subprocess.run(cmd, capture_output=True, text=True)
     raw = r.stdout + r.stderr
     c_file = os.path.join(c_dir, "player.c")
     if r.returncode != 0 or not os.path.exists(c_file):
         return None, diagnostics(raw), raw
     return c_file, [], raw
-
-
-def package_and_build_dna(out_dir, c_dir, cc):
-    """The hybrid player: the translated C, the glue that calls DotNetAnywhere, the runtime with the native functions the managed side may call
-    in its FFI table, and the Box2D shim. The managed assembly and corlib.dll go beside it."""
-    ccs = ccs2c_module()
-    home, bdir = ccs.dna_prepare()
-    for need in (SHIM_A, BOX2D_LIB):
-        if not os.path.exists(need):
-            sys.exit("player_build: %s is missing (python3 build.py native)" % need)
-    glue = os.path.join(c_dir, "player.bridge.c")
-    if not os.path.exists(glue):                                    # nothing was managed: an ordinary player
-        return None
-    manifest = os.path.join(c_dir, "player.ffi.json")
-    if os.path.exists(manifest):
-        ccs.dna_run(["--ffi", manifest, "--lib-only", "--no-corlib"], home, bdir)
-        lib = os.path.join(bdir, "libdna_ffi.a")
-    else:
-        lib = os.path.join(bdir, "libdna.a")
-    shutil.copy2(os.path.join(c_dir, "player.c"), os.path.join(out_dir, "player.c"))
-    shutil.copy2(glue, os.path.join(out_dir, "player.bridge.c"))
-    shutil.copy2(SHIM_H, os.path.join(out_dir, "box2d_shim.h"))
-    os.makedirs(os.path.join(out_dir, "lib"), exist_ok=True)
-    shutil.copy2(SHIM_A, os.path.join(out_dir, "lib", "libstride2d_box2d_static.a"))
-    shutil.copy2(BOX2D_LIB, os.path.join(out_dir, "lib", "libbox2d.a"))
-    shutil.copy2(lib, os.path.join(out_dir, "lib", "libdna.a"))
-    shutil.copy2(os.path.join(c_dir, "player.managed.dll"), out_dir)
-    shutil.copy2(os.path.join(bdir, "corlib.dll"), out_dir)
-    exe = os.path.join(out_dir, "stride2d-player")
-    if os.path.exists(exe):
-        os.remove(exe)
-    cmd = [cc, "-O2", "-ffp-contract=off", "-w", "-I.", "-I", os.path.join(home, "native", "src"), "-o", "stride2d-player", "player.c", "player.bridge.c",
-           "-Llib", "-lstride2d_box2d_static", "-lbox2d", "lib/libdna.a", "-lm", "-lpthread"]
-    g = subprocess.run(cmd, cwd=out_dir, capture_output=True, text=True)
-    if g.returncode != 0:
-        errs = [l for l in g.stderr.splitlines() if "error" in l or "undefined" in l]
-        sys.exit("player_build: the C compiler rejected the hybrid player:\n   " + "\n   ".join(e[:200] for e in errs[:8]))
-    return exe
 
 
 def package_and_build(out_dir, c_file, cc, static):
@@ -197,10 +165,29 @@ def package_and_build(out_dir, c_file, cc, static):
     return exe
 
 
+def sanitize_run(out_dir, cc, expected_stdout):
+    """Builds the translated C again with AddressSanitizer and UBSan and runs it. Returns None if clean, else what went wrong.
+    (Leak detection is off: arena classes live until the process ends by design, and LeakSanitizer discards buffered output.)"""
+    exe = os.path.join(out_dir, "player_asan")
+    cmd = [cc, "-O1", "-g", "-w", "-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-I.", "-o", "player_asan", "player.c",
+           "-Llib", "-lstride2d_box2d_static", "-lbox2d", "-lm"]
+    b = subprocess.run(cmd, cwd=out_dir, capture_output=True, text=True)
+    if b.returncode != 0:
+        return "the sanitizer build failed: " + b.stderr[-300:]
+    env = dict(os.environ, ASAN_OPTIONS="detect_leaks=0", UBSAN_OPTIONS="print_stacktrace=1")
+    r = subprocess.run([exe], cwd=out_dir, capture_output=True, text=True, env=env)
+    bad = [l for l in r.stderr.splitlines() if "ERROR: AddressSanitizer" in l or "runtime error" in l]
+    if bad:
+        return "%d report(s): %s" % (len(bad), bad[0][:200])
+    if r.stdout != expected_stdout:
+        return "output differs under the sanitizers"
+    return None
+
+
 def run_dotnet_reference(game, out_dir):
     gen = os.path.join(out_dir, "generated")
     nets = [os.path.join(gen, "bindings", "net", n) for n in sorted(os.listdir(os.path.join(gen, "bindings", "net")))]
-    files = nets + runtime_files() + game + [os.path.join(gen, "Scripts.g.cs")]
+    files = nets + runtime_files(game) + game + [os.path.join(gen, "Scripts.g.cs")]
     work = os.path.join(out_dir, "dotnet-reference")
     shutil.rmtree(work, ignore_errors=True)
     os.makedirs(work)
@@ -229,8 +216,8 @@ def main():
     ap.add_argument("--static", action="store_true")
     ap.add_argument("--cc", default=os.environ.get("CC") or "cc")
     ap.add_argument("--run", action="store_true")
+    ap.add_argument("--sanitize", action="store_true", help="also run the translated C under AddressSanitizer and UBSan")
     ap.add_argument("--dotnet", action="store_true", help="only run the game on .NET (the reference); no translation")
-    ap.add_argument("--dna", action="store_true", help="run what the C build cannot translate on DotNetAnywhere (see above)")
     a = ap.parse_args()
 
     game_dir = os.path.abspath(a.game)
@@ -256,7 +243,7 @@ def main():
         return ref[1]
     print("game      %s  (%d file%s, entry %s)" % (os.path.relpath(game_dir, ROOT), len(files), "" if len(files) == 1 else "s", main_class))
     try:
-        c_file, diags, raw = translate(files, out_dir, main_class, a.dna)
+        c_file, diags, raw = translate(files, out_dir, main_class)
     except gen_scripts.GenError as e:
         print("%s: error CCS0002: %s" % (game_dir, e))
         return 1
@@ -268,30 +255,23 @@ def main():
             print("player_build: the translator failed:\n" + raw[-1500:])
         return 1
     print("translated  %s  (%d lines of C)" % (os.path.relpath(c_file, ROOT), sum(1 for _ in open(c_file))))
-    managed = []
-    if a.dna:
-        import json
-        with open(os.path.join(os.path.dirname(c_file), "player.partition.json")) as f:
-            part = json.load(f)
-        managed = [c for c in part["classes"] if c["partition"] == "managed"]
-        native = [c for c in part["classes"] if c["partition"] == "native"]
-        if managed:
-            print("hybrid      %d class(es) native, %d on DotNetAnywhere: %s" % (len(native), len(managed), ", ".join(c["name"].split(".")[-1] for c in managed)))
-            for c in managed:
-                why = c["reason"].replace(ROOT + os.sep, "")
-                print("            %-12s %s" % (c["name"].split(".")[-1], why if len(why) < 150 else why[:147] + "..."))
     if a.check:
-        print("ok: the game %s" % ("is inside the C# subset" if not managed else "translates; %d class(es) run on DotNetAnywhere" % len(managed)))
+        print("ok: the game is inside the C# subset")
         return 0
-    exe = package_and_build_dna(out_dir, os.path.dirname(c_file), a.cc) if a.dna else None
-    if exe is None:
-        exe = package_and_build(out_dir, c_file, a.cc, a.static)
+    exe = package_and_build(out_dir, c_file, a.cc, a.static)
     print("built       %s  (%d KiB)" % (os.path.relpath(exe, ROOT), os.path.getsize(exe) // 1024))
     nat = subprocess.run([exe], capture_output=True, text=True, cwd=out_dir)
     rc = 0
     if nat.returncode != 0:
         print("the player exited with %d" % nat.returncode)
         rc = 1
+    if a.sanitize:
+        why = sanitize_run(out_dir, a.cc, nat.stdout)
+        if why is None:
+            print("sanitize  ok: no AddressSanitizer or UBSan reports")
+        else:
+            print("sanitize  FAILED: " + why)
+            rc = 1
     if a.run or a.verify:
         print("\n" + nat.stdout)
     if a.verify:
