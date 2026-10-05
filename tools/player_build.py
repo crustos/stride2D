@@ -38,6 +38,19 @@ def ccs2c_path():
     return os.path.join(home, "crust", "ccs2c.py")
 
 
+def ccs2c_module():
+    """crust/ccs2c.py loaded as a module: it holds the DotNetAnywhere build (dna_prepare, dna_run) that --dna uses."""
+    import importlib.util
+    path = ccs2c_path()
+    here = os.path.dirname(path)
+    if here not in sys.path:
+        sys.path.insert(0, here)                 # ccs2c imports its siblings (inputs, unit) by name
+    spec = importlib.util.spec_from_file_location("ccs2c", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
 FEATURES = {"terrain": "Stride2D.Terrain", "destruction": "Stride2D.Destruction"}     # a Feature="x" item of Stride2D.csproj is in a game that mentions this namespace
 
 
@@ -112,7 +125,7 @@ def generate_only(game, out_dir):
     gen_scripts.generate(os.path.join(gen, "Scripts.g.cs"), game)
 
 
-def translate(game, out_dir, main_class):
+def translate(game, out_dir, main_class, dna=False):
     gen = os.path.join(out_dir, "generated")
     inc = os.path.join(gen, "include")
     shutil.rmtree(gen, ignore_errors=True)
@@ -140,7 +153,10 @@ def package_and_build_dna(out_dir, c_dir, cc):
     """The hybrid player: the translated C, the glue that calls DotNetAnywhere, the runtime with the native functions the managed side may call
     in its FFI table, and the Box2D shim. The managed assembly and corlib.dll go beside it."""
     ccs = ccs2c_module()
-    home, bdir = ccs.dna_prepare()
+    try:
+        home, bdir = ccs.dna_prepare()
+    except Exception as e:                      # ccs2c's Refused: DotNetAnywhere or mono-mcs missing, or its build failed
+        sys.exit("player_build: " + str(e))
     for need in (SHIM_A, BOX2D_LIB):
         if not os.path.exists(need):
             sys.exit("player_build: %s is missing (python3 build.py native)" % need)
@@ -322,7 +338,9 @@ def main():
     if nat.returncode != 0:
         print("the player exited with %d" % nat.returncode)
         rc = 1
-    if a.sanitize:
+    if a.sanitize and managed:
+        print("sanitize  skipped: a hybrid player (with DotNetAnywhere) is not run under the sanitizers")
+    elif a.sanitize:
         why = sanitize_run(out_dir, a.cc, nat.stdout)
         if why is None:
             print("sanitize  ok: no AddressSanitizer or UBSan reports")
