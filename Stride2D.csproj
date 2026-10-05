@@ -1,7 +1,9 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <!--
-    The ONE list of what the Stride2D runtime is. The .NET build (the reference) compiles it; tools/player_build.py reads the same list and
+    The ONE list of what the Stride2D runtime is.
+    Items with Feature="x" are translated only for a game that mentions that feature's namespace (terrain: Stride2D.Terrain), so unused code never
+    holds a game back. The .NET build (the reference) compiles it; tools/player_build.py reads the same list and
     translates it, with the game's scripts, to a single C file. Items marked CBuild="false" are .NET-only (the native bindings, which the C
     build replaces with the generated C flavor). No NuGet packages: nothing here depends on anything.
   -->
@@ -39,8 +41,30 @@
     <Compile Include="src\core\Collider2D.cs" />
     <Compile Include="src\core\World2D.cs" />
     <Compile Include="src\core\SpriteRenderer2D.cs" />
+    <Compile Include="src\core\MeshRenderer2D.cs" />
     <Compile Include="src\core\Renderer2D.cs" />
     <Compile Include="src\core\Scene2D.cs" />
+  </ItemGroup>
+
+  <ItemGroup Label="Terrain model (ported from DTerrain)">
+    <Compile Include="src\terrain\Calc.cs" Feature="terrain" />
+    <Compile Include="src\terrain\Range.cs" Feature="terrain" />
+    <Compile Include="src\terrain\Column.cs" Feature="terrain" />
+    <Compile Include="src\terrain\Shape.cs" Feature="terrain" />
+    <Compile Include="src\terrain\PixelRect.cs" Feature="terrain" />
+    <Compile Include="src\terrain\ColumnQuadTree.cs" Feature="terrain" />
+    <Compile Include="src\terrain\RectMerge.cs" Feature="terrain" />
+    <Compile Include="src\terrain\ChainTrace.cs" Feature="terrain" />
+    <Compile Include="src\terrain\TerrainLimits.cs" Feature="terrain" />
+    <Compile Include="src\terrain\TerrainChunk.cs" Feature="terrain" />
+    <Compile Include="src\terrain\TerrainLayer.cs" Feature="terrain" />
+  </ItemGroup>
+
+  <ItemGroup Label="Destruction (ported from Unity-2D-Destruction)">
+    <Compile Include="src\destruction\PolySet.cs" Feature="destruction" />
+    <Compile Include="src\destruction\Fracturer.cs" Feature="destruction" />
+    <Compile Include="src\destruction\ExplodeOptions.cs" Feature="destruction" />
+    <Compile Include="src\destruction\Destruction2D.cs" Feature="destruction" />
   </ItemGroup>
 
 </Project>

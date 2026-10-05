@@ -23,3 +23,8 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+Copyright (c) 2023 Michael Sakharov (Prowl Game Engine, from which src/core, src/physics and src/native/box2d are derived)
+Box2D: Copyright (c) Erin Catto, MIT.
+Unity-2D-Destruction: Copyright (c) 2016 Matthew Holtzem (src/destruction is ported from it).
+DTerrain: Copyright (c) 2020 Dominik Zimny (src/terrain is ported from it).
