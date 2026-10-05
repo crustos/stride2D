@@ -6,8 +6,12 @@ build.py - top-level build script for Stride2D.
   python3 build.py native [--avx2]      build Box2D-Packed + the pb2_* shim into build/box2d (static + shared)
   python3 build.py ccsharp              build the CCSharp translator (needs the .NET SDK, no NuGet)
   python3 build.py dotnet GAME          run a game on .NET: the reference build
-  python3 build.py check GAME           does GAME translate to C? (prints what is outside the C# subset)
-  python3 build.py player GAME [--verify] [--static] [--run]    translate, build native, optionally compare with .NET
+  python3 build.py check GAME [--dna]   does GAME translate to C? (prints what is outside the C# subset; with --dna, what runs on DotNetAnywhere)
+  python3 build.py player GAME [--verify] [--static] [--run] [--dna]    translate, build native, optionally compare with .NET
+
+--dna: a script that uses a lambda, try/catch or LINQ (outside the C# subset) is not refused: it runs on DotNetAnywhere, a small .NET runtime in C,
+with the classes that use it (the generated Scripts sink, and Main). The engine stays native. Needs ../DotNetAnywhere and mono-mcs; the player then
+runs with player.managed.dll and corlib.dll beside it. See samples/HybridScripts.
   python3 build.py bench [--avx2] [--cachegrind]   native physics benchmark (pyramid + circles); prints a state hash that must not change
   python3 build.py status | clean
 
@@ -70,12 +74,12 @@ def game_args(a):
 
 
 def cmd_dotnet(a):  need("dotnet", "Install the .NET SDK."); run([sys.executable, TOOL] + game_args(a) + ["--dotnet"])
-def cmd_check(a):   run([sys.executable, TOOL] + game_args(a) + ["--check"])
+def cmd_check(a):   run([sys.executable, TOOL] + game_args(a) + ["--check"] + (["--dna"] if a.dna else []))
 
 
 def cmd_player(a):
     cmd = [sys.executable, TOOL] + game_args(a)
-    cmd += [f for f, on in (("--verify", a.verify), ("--static", a.static), ("--run", a.run)) if on]
+    cmd += [f for f, on in (("--verify", a.verify), ("--static", a.static), ("--run", a.run), ("--dna", a.dna)) if on]
     run(cmd)
 
 
@@ -94,8 +98,8 @@ def cmd_bench(a):
 
 
 def cmd_status(a):
-    for n in ("box2d", "CCSharp", "crust", "coost"):
-        p = os.path.join(PARENT, n); log("%-8s %s" % (n, p if os.path.isdir(p) else "MISSING"))
+    for n in ("box2d", "CCSharp", "crust", "coost", "DotNetAnywhere"):
+        p = os.path.join(PARENT, n); log("%-14s %s" % (n, p if os.path.isdir(p) else ("MISSING" if n != "DotNetAnywhere" else "MISSING (only for --dna)")))
     for t in ("python3", "git", "cmake", "cc", "dotnet"):
         log("%-8s %s" % (t, shutil.which(t) or "MISSING"))
     log("shim     %s" % ("built" if os.path.exists(os.path.join(BUILD, "box2d", "libstride2d_box2d_static.a")) else "not built (native)"))
@@ -111,6 +115,7 @@ def main():
     ap.add_argument("game", nargs="?")
     ap.add_argument("--avx2", action="store_true"); ap.add_argument("--cachegrind", action="store_true")
     ap.add_argument("--verify", action="store_true"); ap.add_argument("--static", action="store_true"); ap.add_argument("--run", action="store_true")
+    ap.add_argument("--dna", action="store_true")
     a = ap.parse_args()
     if a.command in ("dotnet", "check", "player") and not a.game: die("%s needs a GAME folder, e.g. samples/Headless2D" % a.command)
     globals()["cmd_" + a.command](a)
