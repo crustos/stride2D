@@ -88,6 +88,17 @@ def game_files(d):
     return sorted(out)
 
 
+def find_frame_class(files):
+    """For --web: the class with a static Init() and a static Frame() (what a page drives), instead of one with Main."""
+    for p in files:
+        text = open(p, encoding="utf-8-sig").read()
+        if re.search(r"\bstatic\s+(?:int|void)\s+Init\s*\(\s*\)", text) and re.search(r"\bstatic\s+void\s+Frame\s*\(\s*\)", text):
+            m = re.search(r"\bclass\s+(\w+)", text)
+            ns = re.search(r"^\s*namespace\s+([\w.]+)", text, re.M)
+            return (ns.group(1) + "." if ns else "") + m.group(1)
+    return None
+
+
 def find_main(files):
     for p in files:
         text = re.sub(r"//[^\n]*", "", open(p, encoding="utf-8-sig").read())
@@ -118,13 +129,42 @@ def diagnostics(text):
     return out
 
 
+GFX_H = os.path.join(ROOT, "src", "native", "gfx2d", "gfx2d.h")
+
+
+def uses_gfx(game):
+    """True if a game file mentions the renderer's namespace: then the gfx2d bindings are generated and libgfx2d is linked."""
+    return any("Stride2D.Native.Gfx2D" in open(p, encoding="utf-8-sig").read() for p in game)
+
+
+def generate_bindings(out_dir, gfx):
+    """Both flavors of the Box2D bindings and, when the game draws, of the renderer's. Both sets are files of one folder (GFX.*.cs beside PB2.*.cs)."""
+    try:
+        gen_pb2.use("box2d")
+        gen_pb2.generate(out_dir)
+        if gfx:
+            gen_pb2.use("gfx2d")
+            m = gen_pb2.generate(out_dir)
+            have = next((c[1] for c in m.consts if c[0] == "GFX_SPRITE_FLOATS"), None)
+            limit = re.search(r"SpriteFloats\s*=\s*(\d+)", open(os.path.join(ROOT, "src", "core", "CoreLimits.cs"), encoding="utf-8").read())
+            if have is not None and limit and int(have) != int(limit.group(1)):
+                sys.exit("player_build: GFX_SPRITE_FLOATS (%s) != CoreLimits.SpriteFloats (%s)" % (have, limit.group(1)))
+    finally:
+        gen_pb2.use("box2d")
+
+
+def gfx_library(wasm=False):
+    """Path of libgfx2d_static.a for the native player (built on demand)."""
+    import gfx_build
+    return gfx_build.build(quiet=True)["static"]
+
+
 def generate_only(game, out_dir):
     """Bindings (both flavors) and the script sink, without translating: what the .NET reference needs."""
     gen = os.path.join(out_dir, "generated")
     shutil.rmtree(gen, ignore_errors=True)
     os.makedirs(gen)
-    gen_pb2.use("box2d")
-    gen_pb2.generate(os.path.join(gen, "bindings"))
+    generate_bindings(os.path.join(gen, "bindings"), uses_gfx(game))
     gen_scripts.generate(os.path.join(gen, "Scripts.g.cs"), game)
 
 
@@ -133,9 +173,10 @@ def translate(game, out_dir, main_class, dna=False):
     inc = os.path.join(gen, "include")
     shutil.rmtree(gen, ignore_errors=True)
     os.makedirs(inc)
-    gen_pb2.use("box2d")
-    gen_pb2.generate(os.path.join(gen, "bindings"))
+    generate_bindings(os.path.join(gen, "bindings"), uses_gfx(game))
     shutil.copy2(SHIM_H, inc)
+    if uses_gfx(game):
+        shutil.copy2(GFX_H, inc)
     sink = os.path.join(gen, "Scripts.g.cs")
     gen_scripts.generate(sink, game)
     c_dir = os.path.join(out_dir, "c")
@@ -193,7 +234,7 @@ def package_and_build_dna(out_dir, c_dir, cc):
     return exe
 
 
-def package_and_build(out_dir, c_file, cc, static):
+def package_and_build(out_dir, c_file, cc, static, gfx=False):
     for need in (SHIM_A, BOX2D_LIB):
         if not os.path.exists(need):
             sys.exit("player_build: %s is missing (python3 build.py native)" % need)
@@ -202,10 +243,15 @@ def package_and_build(out_dir, c_file, cc, static):
     os.makedirs(os.path.join(out_dir, "lib"), exist_ok=True)
     shutil.copy2(SHIM_A, os.path.join(out_dir, "lib", "libstride2d_box2d_static.a"))
     shutil.copy2(BOX2D_LIB, os.path.join(out_dir, "lib", "libbox2d.a"))
+    extra = ""
+    if gfx:
+        shutil.copy2(GFX_H, os.path.join(out_dir, "gfx2d.h"))
+        shutil.copy2(gfx_library(), os.path.join(out_dir, "lib", "libgfx2d_static.a"))
+        extra = " -lgfx2d_static -ldl"       # the renderer loads EGL / GLES / X11 with dlopen: libdl and libm are all it links
     with open(os.path.join(out_dir, "Makefile"), "w", newline="\n") as f:
         f.write("# Builds the player from the translated C. Needs a C compiler and nothing else: no .NET, no CMake.\n"
                 "CC ?= cc\nCFLAGS ?= -O2 -ffp-contract=off -w\n"
-                "LIBS = -Llib -lstride2d_box2d_static -lbox2d -lm\n\n"
+                "LIBS = -Llib -lstride2d_box2d_static -lbox2d%s -lm\n\n" % extra +
                 "stride2d-player: player.c box2d_shim.h lib/libstride2d_box2d_static.a lib/libbox2d.a\n"
                 "\t$(CC) $(CFLAGS) -I. -o $@ player.c $(LIBS)\n\n"
                 "static: player.c box2d_shim.h lib/libstride2d_box2d_static.a lib/libbox2d.a\n"
@@ -215,7 +261,7 @@ def package_and_build(out_dir, c_file, cc, static):
     if os.path.exists(exe):
         os.remove(exe)
     cmd = [cc, "-O2", "-ffp-contract=off", "-w", "-I.", "-o", "stride2d-player", "player.c",
-           "-Llib", "-lstride2d_box2d_static", "-lbox2d", "-lm"]
+           "-Llib", "-lstride2d_box2d_static", "-lbox2d"] + (["-lgfx2d_static", "-ldl"] if gfx else []) + ["-lm"]
     if static:
         cmd.insert(1, "-static")
     g = subprocess.run(cmd, cwd=out_dir, capture_output=True, text=True)
@@ -280,19 +326,23 @@ def main():
     ap.add_argument("--dotnet", action="store_true", help="only run the game on .NET (the reference); no translation")
     ap.add_argument("--dna", action="store_true", help="run what the C build cannot translate on DotNetAnywhere (see above)")
     ap.add_argument("--wasm", action="store_true", help="build for WebAssembly (wasm32-wasi), run under node")
+    ap.add_argument("--web", action="store_true", help="build a browser page (WebGL2 / WebGPU): the game has static Init() and Frame() instead of Main; implies --wasm")
     a = ap.parse_args()
 
+    if a.web: a.wasm = True
     game_dir = os.path.abspath(a.game)
     files = game_files(game_dir)
     if not files:
         sys.exit("player_build: no .cs files in %s" % game_dir)
-    main_class = find_main(files)
+    main_class = find_main(files) if not a.web else find_frame_class(files)
     if not main_class:
         sys.exit("player_build: no class with a static Main in %s" % game_dir)
     if not os.path.exists(ccs2c_path()):
         sys.exit("player_build: CCSharp not found at %s (python3 build.py deps)" % ccs2c_path())
     name = os.path.basename(game_dir.rstrip(os.sep))
-    out_dir = os.path.abspath(a.out or os.path.join(BUILD, "player", name + ("-wasm" if a.wasm else "")))
+    if a.web and not uses_gfx(files):
+        sys.exit("player_build: --web: the game does not use Stride2D.Native.Gfx2D, so there is nothing for a page to draw")
+    out_dir = os.path.abspath(a.out or os.path.join(BUILD, "player", name + ("-web" if a.web else "-wasm" if a.wasm else "")))
     os.makedirs(out_dir, exist_ok=True)
     if a.wasm:
         import wasm_build
@@ -345,6 +395,13 @@ def main():
         if a.dna and os.path.exists(os.path.join(c_dir, "player.bridge.c")):
             exe, module = wasm_build.link_hybrid(out_dir, c_dir, a.cc if a.cc != "cc" else None)
             kind = "hybrid: native C + managed on DotNetAnywhere, wasm32"
+        elif a.web:
+            shutil.copy2(c_file, os.path.join(out_dir, "player.c"))
+            shutil.copy2(GFX_H, os.path.join(out_dir, "gfx2d.h"))
+            module = wasm_build.link_web(out_dir, main_class)
+            print("built       %s  (%d KiB; a page: serve %s over http://localhost and open index.html, ?gfx=webgl2 or ?gfx=webgpu)" % (
+                os.path.relpath(module, ROOT), os.path.getsize(module) // 1024, os.path.relpath(out_dir, ROOT)))
+            return 0
         else:
             shutil.copy2(c_file, os.path.join(out_dir, "player.c"))
             exe, module = wasm_build.link_player(out_dir)
@@ -354,7 +411,7 @@ def main():
     else:
         exe = package_and_build_dna(out_dir, c_dir, a.cc) if a.dna else None
         if exe is None:
-            exe = package_and_build(out_dir, c_file, a.cc, a.static)
+            exe = package_and_build(out_dir, c_file, a.cc, a.static, uses_gfx(files))
         print("built       %s  (%d KiB)" % (os.path.relpath(exe, ROOT), os.path.getsize(exe) // 1024))
     nat = subprocess.run([exe], capture_output=True, text=True, cwd=out_dir)
     rc = 0
