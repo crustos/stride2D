@@ -17,6 +17,8 @@ runs with player.managed.dll and corlib.dll beside it. See samples/HybridScripts
 llvm-ar, wasi-libc (apt install clang lld llvm wasi-libc libclang-rt-dev-wasm32); Box2D is compiled for wasm32 on first use. Works with --dna.
 
   python3 build.py test [--sanitize] [--dna] [--wasm] [NAME..]      every folder of tests/ and samples/, native (or wasm) vs .NET (and under the sanitizers)
+  python3 build.py gfx                  build the Gfx2D renderer (CPU, desktop OpenGL) into build/gfx: static + shared library and the test driver
+  python3 build.py gfx-test [--wasm]    test it: CPU vs GL, and with --wasm (clang, node + playwright, Chromium) WebGL2 and WebGPU too
   python3 build.py bench [--avx2] [--cachegrind]   native physics benchmark (pyramid + circles); prints a state hash that must not change
   python3 build.py status | clean
 
@@ -131,6 +133,11 @@ def cmd_test(a):
     if bad: sys.exit(1)
 
 
+def cmd_gfx(a): run([sys.executable, os.path.join(ROOT, "tools", "gfx_build.py")])
+
+def cmd_gfx_test(a): run([sys.executable, os.path.join(ROOT, "tools", "gfx_test.py")] + (["--web"] if a.wasm else []))
+
+
 def cmd_status(a):
     for n in ("box2d", "CCSharp", "crust", "coost", "DotNetAnywhere"):
         p = os.path.join(PARENT, n); log("%-14s %s" % (n, p if os.path.isdir(p) else ("MISSING" if n != "DotNetAnywhere" else "MISSING (only for --dna)")))
@@ -146,7 +153,7 @@ def cmd_clean(a): shutil.rmtree(BUILD, ignore_errors=True); log("removed build/"
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("command", choices=["deps", "native", "ccsharp", "dotnet", "check", "player", "test", "bench", "status", "clean"])
+    ap.add_argument("command", choices=["deps", "native", "ccsharp", "dotnet", "check", "player", "test", "bench", "gfx", "gfx-test", "status", "clean"])
     ap.add_argument("game", nargs="?"); ap.add_argument("more", nargs="*", default=[])
     ap.add_argument("--avx2", action="store_true")
     ap.add_argument("--cachegrind", action="store_true")
@@ -155,7 +162,7 @@ def main():
     ap.add_argument("--sanitize", action="store_true"); ap.add_argument("--static", action="store_true"); ap.add_argument("--run", action="store_true")
     a = ap.parse_args()
     if a.command in ("dotnet", "check", "player") and not a.game: die("%s needs a GAME folder, e.g. samples/Headless2D" % a.command)
-    globals()["cmd_" + a.command](a)
+    globals()["cmd_" + a.command.replace("-", "_")](a)
 
 
 if __name__ == "__main__":

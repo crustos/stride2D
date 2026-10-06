@@ -14,12 +14,14 @@ It started as a fork of [Stride](https://github.com/stride3d/stride). The engine
 | **Physics** | [Box2D](https://github.com/crustos/box2d) (the crustos fork): rigidbodies; box, circle and convex polygon colliders; collision and trigger events; overlap queries; forces and impulses |
 | **Destructible terrain** | A port of [DTerrain](https://github.com/crustos/DTerrain): a pixel bitmap you can dig and build, with box or smooth one-sided chain colliders, rebuilt per chunk, and a dirty rectangle for the renderer |
 | **Shattering sprites** | A port of [Unity-2D-Destruction](https://github.com/crustos/Unity-2D-Destruction): break a box or convex polygon into Voronoi or Delaunay fragments, each a rigidbody with a polygon collider and a textured mesh; explosion forces |
+| **Rendering** | A C renderer (`src/native/gfx2d`) that draws the sprite and mesh batches: desktop OpenGL ES 3 (loaded at run time through EGL), a deterministic CPU rasteriser as the fallback, and WebGL2 and WebGPU in a browser. See [Rendering](#rendering) |
 | **Draw data** | Sprite instances, mesh triangle lists and the terrain's dirty rectangle, ready for a renderer |
 | **Scripts outside the subset** | Optional: a script that uses lambdas, `try/catch` or LINQ runs on [DotNetAnywhere](https://github.com/crustos/DotNetAnywhere), while the engine stays native |
 
 ## What does not exist yet
 
-- **No window, renderer, textures, input or audio.** The engine produces draw data; nothing consumes it yet. Everything runs headless.
+- **No input or audio.** There is a renderer (below) and a window on X11 only; no keyboard or mouse, no sound. A window on Windows or macOS is not written (the CPU and WebGL/WebGPU backends are portable C and JS; the desktop GL path is Linux).
+- **The renderer's .NET and C# -> C paths are not yet run by the tests.** The C library, its four backends and the page are tested (`python3 build.py gfx-test`); the C# bindings it generates and `--web` are written but have only been checked against the generator, not translated or run.
 - **Terrain raises no collision events.** Terrain shapes carry no collider id, so contacts with them are not reported (contacts between fragments and other bodies are).
 - **Shattering needs a convex outline.** A concave one is refused.
 - **3D objects drawn in front of or behind 2D layers** is planned, not built.
@@ -72,8 +74,30 @@ scalar and SIMD paths, so the module prints what the native player and .NET prin
 (`apt install clang lld llvm wasi-libc libclang-rt-dev-wasm32`), and CCSharp and DotNetAnywhere new enough to have `--wasm`.
 
 `--wasm --dna` works too: a script with a lambda or `try/catch` runs on DotNetAnywhere compiled to wasm (with its wasm JIT under node), the engine stays native C, as in the native hybrid (`samples/HybridScripts`).
-`python3 build.py test --wasm --dna` runs every test and sample that way: all match .NET. Not combined with `--static` or `--sanitize`. There is no renderer in this engine yet, so no browser page; the
-[Prowl2D](https://github.com/crustos/Prowl2D) fork of this runtime has one (`--web`).
+`python3 build.py test --wasm --dna` runs every test and sample that way: all match .NET. Not combined with `--static` or `--sanitize`. A browser page is built with `--web` (see Rendering).
+
+## Rendering
+
+`src/native/gfx2d/gfx2d.h` is the whole API, in C: `gfx_init`, `gfx_camera`, `gfx_begin`, `gfx_sprites` / `gfx_triangles` (the batches `Renderer2D.DrawData` and `MeshData` already produce), `gfx_end`, and textures. `tools/gen_pb2.py --lib gfx2d` writes the C# class `GFX` from it, in the two flavors the Box2D bindings have, so a game calls `GFX.Sprites(scene.Render.DrawData, n)` and it runs on .NET and in the translated C.
+
+| Backend | Where | Notes |
+|---|---|---|
+| GL | Linux desktop | OpenGL ES 3 through EGL, X11 window; all loaded with `dlopen`, so nothing but libdl and libm is linked. Headless uses EGL's surfaceless platform |
+| SOFT | anywhere | CPU rasteriser; the same pixels on every machine. The fallback when there is no GL, and what the others are tested against |
+| WebGL2, WebGPU | browser | `src/native/gfx2d/web/`: the wasm module imports a `gfx` namespace that `stride2d_web.js` implements. `?gfx=webgl2` or `?gfx=webgpu` picks one; the default is WebGPU when the browser has it |
+
+`STRIDE2D_GFX=soft|gl` forces a native backend, `STRIDE2D_HEADLESS=1` draws offscreen, `STRIDE2D_GFX_DEBUG=1` says what was chosen and why. Build with `-DGFX_NO_X11` for no window code at all.
+
+```
+python3 build.py gfx                  # build/gfx: libgfx2d_static.a, libgfx2d.so, a test driver
+python3 build.py gfx-test [--wasm]    # CPU determinism, GL vs CPU, no-GL fallback; with --wasm also WebGL2 and WebGPU in headless Chromium
+python3 tools/player_build.py gfx_samples/Draw2D --run     # a game that draws, native
+python3 tools/player_build.py gfx_samples/Draw2D --web     # the same game as a page: build/player/Draw2D-web/
+```
+
+A game that draws has a `static void Frame()` and `static int Init()` for the page (and a `Main` for native). A page needs to be served over `http://localhost` (WebGPU exists only in a secure context). The WebGPU backend reads pixels back asynchronously, so `gfx_pixel` and `gfx_frame_hash` on a page lag one frame behind; the page's `stride2d.readPixels()` is exact.
+
+Limits: 8192 sprites and 65536 mesh vertices per frame, 64 textures of at most 8192 x 8192 (`GFX_MAX_*`; `GFX_SPRITE_FLOATS` must equal `CoreLimits.SpriteFloats`, which `player_build.py` checks). An oval or circle is anti-aliased; a box is not. Needs for the tests: numpy and Pillow; for the browser tests clang with wasm32-wasi, node, playwright-core and Chromium (WebGPU also xvfb-run and Mesa's lavapipe on a machine with no GPU).
 
 ## Writing a game
 
@@ -175,9 +199,11 @@ Pools are fixed at build time (`src/core/CoreLimits.cs`, `src/physics/`, `src/te
 | `src/core/` | Scene, nodes, components, sprite and mesh renderers, the physics world |
 | `src/physics/` | The simulation core and its registry |
 | `src/native/box2d/` | The C shim over Box2D (`pb2_*`) and its CMake |
+| `src/native/gfx2d/` | The renderer: C core, CPU and GL backends, the wasm imports, the page (`web/`) and its tests (`test/`) |
+| `gfx_samples/` | Games that draw (a picture is not text, so `build.py test` does not run them) |
 | `src/terrain/` | Destructible terrain |
 | `src/destruction/` | Shattering and explosions |
-| `tools/` | `player_build.py` (translate, build, verify), `gen_scripts.py`, `gen_pb2.py` |
+| `tools/` | `player_build.py` (translate, build, verify), `gen_scripts.py`, `gen_pb2.py`, `gfx_build.py`, `gfx_test.py`, `gfx_compare.py`, `gfx_web_test.mjs` |
 | `tests/`, `samples/` | Headless programs that print what they do; they double as the test suite |
 | `bench/` | The native physics benchmark |
 | `Stride2D.csproj` | The one list of runtime source files, used by the .NET and the C build |
