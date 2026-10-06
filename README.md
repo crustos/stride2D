@@ -57,12 +57,23 @@ This builds each folder of `tests/` and `samples/` natively, compares it with .N
 | `ccsharp` | Build the translator |
 | `dotnet GAME` | Run a game on .NET: the reference |
 | `check GAME [--dna]` | Does it translate to C? Prints what is outside the subset, with file and line |
-| `player GAME [--verify] [--static] [--run] [--dna]` | Translate, build the native player, optionally compare with .NET |
-| `test [--sanitize] [--dna] [NAME..]` | Every test and sample: native against .NET |
+| `player GAME [--verify] [--static] [--run] [--dna] [--wasm]` | Translate, build the native player (or, with `--wasm`, a WebAssembly module), optionally compare with .NET |
+| `test [--sanitize] [--dna] [--wasm] [NAME..]` | Every test and sample: native (or wasm) against .NET |
 | `bench [--avx2] [--cachegrind]` | Native physics benchmark; prints a state hash that must not change |
 | `status`, `clean` | Show what is installed; remove `build/` |
 
 `GAME` is any folder of `.cs` files with a static `Main`.
+
+## WebAssembly
+
+`python3 build.py player samples/Headless2D --wasm --verify` builds the same game for wasm32-wasi: `build/player/Headless2D-wasm/stride2d-player.wasm`, and a launcher `stride2d-player` that runs it under
+node 20+ (with `run_wasm.mjs`, the host, from DotNetAnywhere). Box2D-Packed and the shim are compiled with clang for wasm32 on first use (`build/wasm32`), without SIMD: Box2D v3 gives the same results on its
+scalar and SIMD paths, so the module prints what the native player and .NET print. `--verify` checks exactly that. It needs `clang`, `lld`, `llvm-ar`, wasi-libc and node
+(`apt install clang lld llvm wasi-libc libclang-rt-dev-wasm32`), and CCSharp and DotNetAnywhere new enough to have `--wasm`.
+
+`--wasm --dna` works too: a script with a lambda or `try/catch` runs on DotNetAnywhere compiled to wasm (with its wasm JIT under node), the engine stays native C, as in the native hybrid (`samples/HybridScripts`).
+`python3 build.py test --wasm --dna` runs every test and sample that way: all match .NET. Not combined with `--static` or `--sanitize`. There is no renderer in this engine yet, so no browser page; the
+[Prowl2D](https://github.com/crustos/Prowl2D) fork of this runtime has one (`--web`).
 
 ## Writing a game
 

@@ -7,13 +7,16 @@ build.py - top-level build script for Stride2D.
   python3 build.py ccsharp              build the CCSharp translator (needs the .NET SDK, no NuGet)
   python3 build.py dotnet GAME          run a game on .NET: the reference build
   python3 build.py check GAME [--dna]   does GAME translate to C? (prints what is outside the C# subset; with --dna, what runs on DotNetAnywhere)
-  python3 build.py player GAME [--verify] [--static] [--run] [--dna]    translate, build native, optionally compare with .NET
+  python3 build.py player GAME [--verify] [--static] [--run] [--dna] [--wasm]    translate, build native (or WebAssembly), optionally compare with .NET
 
 --dna: a script that uses a lambda, try/catch or LINQ (outside the C# subset) is not refused: it runs on DotNetAnywhere, a small .NET runtime in C,
 with the classes that use it (the generated Scripts sink, and Main). The engine stays native. Needs ../DotNetAnywhere and mono-mcs; the player then
 runs with player.managed.dll and corlib.dll beside it. See samples/HybridScripts.
 
-  python3 build.py test [--sanitize] [--dna] [NAME..]      every folder of tests/ and samples/, native vs .NET (and under the sanitizers)
+--wasm: build for WebAssembly (wasm32-wasi) instead: build/player/GAME-wasm/stride2d-player.wasm and a launcher that runs it under node 20+. Needs clang, lld,
+llvm-ar, wasi-libc (apt install clang lld llvm wasi-libc libclang-rt-dev-wasm32); Box2D is compiled for wasm32 on first use. Works with --dna.
+
+  python3 build.py test [--sanitize] [--dna] [--wasm] [NAME..]      every folder of tests/ and samples/, native (or wasm) vs .NET (and under the sanitizers)
   python3 build.py bench [--avx2] [--cachegrind]   native physics benchmark (pyramid + circles); prints a state hash that must not change
   python3 build.py status | clean
 
@@ -81,7 +84,7 @@ def cmd_check(a):   run([sys.executable, TOOL] + game_args(a) + ["--check"] + ([
 
 def cmd_player(a):
     cmd = [sys.executable, TOOL] + game_args(a)
-    cmd += [f for f, on in (("--verify", a.verify), ("--static", a.static), ("--run", a.run), ("--dna", a.dna)) if on]
+    cmd += [f for f, on in (("--verify", a.verify), ("--static", a.static), ("--run", a.run), ("--dna", a.dna), ("--wasm", a.wasm)) if on]
     run(cmd)
 
 
@@ -110,7 +113,7 @@ def cmd_test(a):
     if not names: die("nothing to run")
     results = []
     for n in names:
-        cmd = [sys.executable, TOOL, n, "--verify"] + (["--sanitize"] if a.sanitize else []) + (["--dna"] if a.dna else [])
+        cmd = [sys.executable, TOOL, n, "--verify"] + (["--sanitize"] if a.sanitize else []) + (["--dna"] if a.dna else []) + (["--wasm"] if a.wasm else [])
         log("running " + n)
         r = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
         out = r.stdout + r.stderr
@@ -147,7 +150,7 @@ def main():
     ap.add_argument("game", nargs="?"); ap.add_argument("more", nargs="*", default=[])
     ap.add_argument("--avx2", action="store_true")
     ap.add_argument("--cachegrind", action="store_true")
-    ap.add_argument("--dna", action="store_true")
+    ap.add_argument("--dna", action="store_true"); ap.add_argument("--wasm", action="store_true")
     ap.add_argument("--verify", action="store_true")
     ap.add_argument("--sanitize", action="store_true"); ap.add_argument("--static", action="store_true"); ap.add_argument("--run", action="store_true")
     a = ap.parse_args()
