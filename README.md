@@ -97,6 +97,12 @@ python3 tools/player_build.py gfx_samples/Draw2D --web     # the same game as a 
 
 A game that draws has a `static void Frame()` and `static int Init()` for the page (and a `Main` for native). A page needs to be served over `http://localhost` (WebGPU exists only in a secure context). The WebGPU backend reads pixels back asynchronously, so `gfx_pixel` and `gfx_frame_hash` on a page lag one frame behind; the page's `stride2d.readPixels()` is exact.
 
+### Input
+
+`gfx_poll_event` returns the window's or the page's input as five ints, `[type, a, b, c, d]`, oldest first (`GFX.PollEvent(int[] out5)` in C#): mouse move, button, wheel, key down and up, typed text, focus and close. Positions are picture pixels with y from the top, whatever the backend. A key is its ASCII code (a letter is its capital) or a `GFX_KEY_*`, named by what the key is and not by the text it types; the text comes as its own event. `gfx_inject_event` queues an event as if the window had sent it, which is how a test or a scripted demo drives a game on every backend the same way. The queue holds 256 events and drops the newest when it is full (`GFX_STAT_EVENTS_DROPPED`). The table is in `gfx2d.h`.
+
+The X11 window reports Latin-1 text (it has no input method yet); a page reports any character. `python3 build.py gfx-test` sends the same fixed input to a real window under Xvfb and to a page in headless Chromium, and checks what comes back.
+
 Limits: 8192 sprites and 65536 mesh vertices per frame, 64 textures of at most 8192 x 8192 (`GFX_MAX_*`; `GFX_SPRITE_FLOATS` must equal `CoreLimits.SpriteFloats`, which `player_build.py` checks). An oval or circle is anti-aliased; a box is not. Needs for the tests: numpy and Pillow; for the browser tests clang with wasm32-wasi, node, playwright-core and Chromium (WebGPU also xvfb-run and Mesa's lavapipe on a machine with no GPU).
 
 ## Writing a game
