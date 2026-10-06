@@ -14,7 +14,7 @@ internal static class CoreLimits
     public const int Colliders = 256;
     public const int Sprites = 256;
 
-    /// <summary>Floats per sprite in a draw batch. Must equal GFX_SPRITE_FLOATS in Native/Gfx2D/gfx2d.h (player_build.py checks).</summary>
+    /// <summary>Floats per sprite in a draw batch. Must equal GFX_SPRITE_FLOATS in src/native/gfx2d/gfx2d.h (player_build.py checks).</summary>
     public const int SpriteFloats = 12;
     public const int Meshes = 256;
     public const int MeshVertices = 8;            // a polygon of a mesh: convex, at most as many points as a native polygon shape
