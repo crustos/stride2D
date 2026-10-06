@@ -10,6 +10,9 @@ GAME_DIR holds the game's C# files: scripts (classes marked [Script]) and one cl
 --check   stop after step 2 and print what is outside the C# subset as `File.cs(line,col): error CCS0001: ...`
 --verify  also run the game on .NET (the reference) and require the same output
 --static  link a fully static executable (no loader, no libc.so)
+--wasm    build for WebAssembly (wasm32-wasi): OUT/stride2d-player.wasm and a launcher OUT/stride2d-player that runs it under node 20+ (with run_wasm.mjs, the
+          host, from DotNetAnywhere). Box2D and the shim are compiled for wasm32 first (build/wasm32). With --verify the output is compared with the .NET run too.
+          Combines with --dna (the managed classes run on DotNetAnywhere compiled to wasm, with its JIT). Not with --static or --sanitize.
 --dna     a class the C build cannot translate (a script that uses a lambda, try/catch, LINQ ...) runs on DotNetAnywhere instead of being refused,
           together with the classes that use it; the engine stays native and the managed side reaches its objects by address. Needs DotNetAnywhere
           (../DotNetAnywhere) and mono-mcs. The player then needs player.managed.dll and corlib.dll beside it.
@@ -276,6 +279,7 @@ def main():
     ap.add_argument("--sanitize", action="store_true", help="also run the translated C under AddressSanitizer and UBSan")
     ap.add_argument("--dotnet", action="store_true", help="only run the game on .NET (the reference); no translation")
     ap.add_argument("--dna", action="store_true", help="run what the C build cannot translate on DotNetAnywhere (see above)")
+    ap.add_argument("--wasm", action="store_true", help="build for WebAssembly (wasm32-wasi), run under node")
     a = ap.parse_args()
 
     game_dir = os.path.abspath(a.game)
@@ -288,8 +292,15 @@ def main():
     if not os.path.exists(ccs2c_path()):
         sys.exit("player_build: CCSharp not found at %s (python3 build.py deps)" % ccs2c_path())
     name = os.path.basename(game_dir.rstrip(os.sep))
-    out_dir = os.path.abspath(a.out or os.path.join(BUILD, "player", name))
+    out_dir = os.path.abspath(a.out or os.path.join(BUILD, "player", name + ("-wasm" if a.wasm else "")))
     os.makedirs(out_dir, exist_ok=True)
+    if a.wasm:
+        import wasm_build
+        ok, why = wasm_build.available()
+        if not ok:
+            sys.exit("player_build: --wasm: " + why)
+        if a.static or a.sanitize:
+            sys.exit("player_build: --static and --sanitize are for the native player; --wasm builds a wasm module")
     if a.dotnet:
         generate_only(files, out_dir)
         ref, err = run_dotnet_reference(files, out_dir)
@@ -328,11 +339,23 @@ def main():
     if a.check:
         print("ok: the game %s" % ("is inside the C# subset" if not managed else "translates; %d class(es) run on DotNetAnywhere" % len(managed)))
         return 0
-    exe = package_and_build_dna(out_dir, os.path.dirname(c_file), a.cc) if a.dna else None
-    if exe is None:
-        exe = package_and_build(out_dir, c_file, a.cc, a.static)
-    
-    print("built       %s  (%d KiB)" % (os.path.relpath(exe, ROOT), os.path.getsize(exe) // 1024))
+    c_dir = os.path.dirname(c_file)
+    if a.wasm:
+        shutil.copy2(SHIM_H, os.path.join(out_dir, "box2d_shim.h"))
+        if a.dna and os.path.exists(os.path.join(c_dir, "player.bridge.c")):
+            exe, module = wasm_build.link_hybrid(out_dir, c_dir, a.cc if a.cc != "cc" else None)
+            kind = "hybrid: native C + managed on DotNetAnywhere, wasm32"
+        else:
+            shutil.copy2(c_file, os.path.join(out_dir, "player.c"))
+            exe, module = wasm_build.link_player(out_dir)
+            kind = "wasm32"
+        print("built       %s  (%d KiB; %s; run it with %s, which needs node 20+)" % (os.path.relpath(module, ROOT), os.path.getsize(module) // 1024, kind,
+                                                                                 os.path.relpath(exe, ROOT)))
+    else:
+        exe = package_and_build_dna(out_dir, c_dir, a.cc) if a.dna else None
+        if exe is None:
+            exe = package_and_build(out_dir, c_file, a.cc, a.static)
+        print("built       %s  (%d KiB)" % (os.path.relpath(exe, ROOT), os.path.getsize(exe) // 1024))
     nat = subprocess.run([exe], capture_output=True, text=True, cwd=out_dir)
     rc = 0
     if nat.returncode != 0:
@@ -356,7 +379,7 @@ def main():
             return 1
         text, code = ref
         if text == nat.stdout and code == nat.returncode:
-            print("verify    ok: native and .NET print identical output (%d lines) and exit with the same code (%d)" % (len(text.splitlines()), code))
+            print("verify    ok: %s and .NET print identical output (%d lines) and exit with the same code (%d)" % ("the wasm module" if a.wasm else "native", len(text.splitlines()), code))
         else:
             x, y = text.splitlines(), nat.stdout.splitlines()
             first = next((i for i in range(max(len(x), len(y))) if i >= len(x) or i >= len(y) or x[i] != y[i]), -1)
