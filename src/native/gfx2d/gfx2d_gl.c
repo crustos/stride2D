@@ -410,6 +410,9 @@ static struct
 	__typeof__( XAllocSizeHints )* f_AllocSizeHints;
 	__typeof__( XSetWMNormalHints )* f_SetWMNormalHints;
 	__typeof__( XSetErrorHandler )* f_SetErrorHandler;
+	__typeof__( XLookupString )* f_LookupString;
+	__typeof__( XLookupKeysym )* f_LookupKeysym;
+	__typeof__( XPeekEvent )* f_PeekEvent;
 } xl;
 
 static Display* g_xdpy;
@@ -441,7 +444,8 @@ static int x_load( void )
 	XF( CreateWindow, XCreateWindow ) XF( DestroyWindow, XDestroyWindow ) XF( MapWindow, XMapWindow ) XF( StoreName, XStoreName )
 	XF( InternAtom, XInternAtom ) XF( SetWMProtocols, XSetWMProtocols ) XF( Pending, XPending ) XF( NextEvent, XNextEvent ) XF( Flush, XFlush )
 	XF( Sync, XSync ) XF( GetVisualInfo, XGetVisualInfo ) XF( Free, XFree ) XF( AllocSizeHints, XAllocSizeHints )
-	XF( SetWMNormalHints, XSetWMNormalHints ) XF( SetErrorHandler, XSetErrorHandler )
+	XF( SetWMNormalHints, XSetWMNormalHints ) XF( SetErrorHandler, XSetErrorHandler ) XF( LookupString, XLookupString )
+	XF( LookupKeysym, XLookupKeysym ) XF( PeekEvent, XPeekEvent )
 #undef XF
 	if ( missing != NULL )
 	{
@@ -517,7 +521,7 @@ static unsigned long x_window( int width, int height, EGLDisplay* dpy_out, EGLCo
 	memset( &attrs, 0, sizeof attrs );
 	attrs.colormap = g_xcmap;
 	attrs.border_pixel = 0;
-	attrs.event_mask = StructureNotifyMask;
+	attrs.event_mask = StructureNotifyMask | KeyPressMask | KeyReleaseMask | ButtonPressMask | ButtonReleaseMask | PointerMotionMask | FocusChangeMask;
 	g_xwin = xl.f_CreateWindow( g_xdpy, xl.f_RootWindow( g_xdpy, screen ), 0, 0, (unsigned)width, (unsigned)height, 0, depth, InputOutput, visual,
 							 CWColormap | CWBorderPixel | CWEventMask, &attrs );
 	if ( vi != NULL )
@@ -550,16 +554,115 @@ static unsigned long x_window( int width, int height, EGLDisplay* dpy_out, EGLCo
 	return (unsigned long)g_xwin;
 }
 
+static int x_mods( unsigned state )
+{
+	return ( ( state & ShiftMask ) ? GFX_MOD_SHIFT : 0 ) | ( ( state & ControlMask ) ? GFX_MOD_CTRL : 0 ) | ( ( state & Mod1Mask ) ? GFX_MOD_ALT : 0 ) |
+		   ( ( state & Mod4Mask ) ? GFX_MOD_SUPER : 0 );
+}
+
+// An X keysym as a GFX_KEY_*: printable keys by their ASCII (a letter is its capital), the rest from the table; 0 for a key gfx2d.h has no name for.
+static int x_key( unsigned long ks )
+{
+	if ( ks >= 'a' && ks <= 'z' )
+		return (int)ks - 32;
+	if ( ks >= 0x20 && ks <= 0x7e )
+		return (int)ks;
+	if ( ks >= 0xffbe && ks <= 0xffc9 )
+		return GFX_KEY_F1 + (int)( ks - 0xffbe );
+	switch ( ks )
+	{
+		case 0xff1b: return GFX_KEY_ESCAPE;
+		case 0xff0d: case 0xff8d: return GFX_KEY_ENTER;
+		case 0xff09: return GFX_KEY_TAB;
+		case 0xff08: return GFX_KEY_BACKSPACE;
+		case 0xff63: return GFX_KEY_INSERT;
+		case 0xffff: return GFX_KEY_DELETE;
+		case 0xff53: return GFX_KEY_RIGHT;
+		case 0xff51: return GFX_KEY_LEFT;
+		case 0xff54: return GFX_KEY_DOWN;
+		case 0xff52: return GFX_KEY_UP;
+		case 0xff55: return GFX_KEY_PAGE_UP;
+		case 0xff56: return GFX_KEY_PAGE_DOWN;
+		case 0xff50: return GFX_KEY_HOME;
+		case 0xff57: return GFX_KEY_END;
+		case 0xffe1: return GFX_KEY_LEFT_SHIFT;
+		case 0xffe2: return GFX_KEY_RIGHT_SHIFT;
+		case 0xffe3: return GFX_KEY_LEFT_CTRL;
+		case 0xffe4: return GFX_KEY_RIGHT_CTRL;
+		case 0xffe9: return GFX_KEY_LEFT_ALT;
+		case 0xffea: return GFX_KEY_RIGHT_ALT;
+		case 0xffeb: return GFX_KEY_LEFT_SUPER;
+		case 0xffec: return GFX_KEY_RIGHT_SUPER;
+		default: return 0;
+	}
+}
+
+// Takes everything the server has sent and turns it into gfx2d events. The window is the picture's size, so a pointer position is a picture pixel.
 static void x_pump( void )
 {
+	static int repeat_next; // the KeyPress about to come is an auto-repeat (the server sends a release and a press with the same time)
 	while ( g_xdpy != NULL && xl.f_Pending( g_xdpy ) > 0 )
 	{
 		XEvent ev;
 		xl.f_NextEvent( g_xdpy, &ev );
-		if ( ev.type == ClientMessage && (Atom)ev.xclient.data.l[0] == g_wm_delete )
-			g_running = 0;
-		else if ( ev.type == DestroyNotify )
-			g_running = 0;
+		switch ( ev.type )
+		{
+			case ClientMessage:
+				if ( (Atom)ev.xclient.data.l[0] == g_wm_delete )
+				{
+					g_running = 0;
+					gfx_input_close();
+				}
+				break;
+			case DestroyNotify: g_running = 0; break;
+			case MotionNotify: gfx_input_push( GFX_EVENT_MOUSE_MOVE, ev.xmotion.x, ev.xmotion.y, 0, x_mods( ev.xmotion.state ) ); break;
+			case ButtonPress:
+			case ButtonRelease:
+			{
+				int b = (int)ev.xbutton.button, m = x_mods( ev.xbutton.state ), down = ev.type == ButtonPress;
+				if ( b >= 1 && b <= 3 )
+					gfx_input_push( down ? GFX_EVENT_MOUSE_DOWN : GFX_EVENT_MOUSE_UP, ev.xbutton.x, ev.xbutton.y, b == 1 ? GFX_BUTTON_LEFT : b == 2 ? GFX_BUTTON_MIDDLE : GFX_BUTTON_RIGHT, m );
+				else if ( down && b >= 4 && b <= 7 ) // the wheel is four buttons: up, down, left, right
+					gfx_input_push( GFX_EVENT_WHEEL, ev.xbutton.x, ev.xbutton.y, b == 6 ? -120 : b == 7 ? 120 : 0, b == 4 ? 120 : b == 5 ? -120 : 0 );
+				break;
+			}
+			case KeyRelease:
+				if ( xl.f_Pending( g_xdpy ) > 0 )
+				{
+					XEvent next;
+					xl.f_PeekEvent( g_xdpy, &next );
+					if ( next.type == KeyPress && next.xkey.keycode == ev.xkey.keycode && next.xkey.time == ev.xkey.time )
+					{
+						repeat_next = 1;
+						break;
+					}
+				}
+				{
+					int key = x_key( xl.f_LookupKeysym( &ev.xkey, 0 ) );
+					if ( key )
+						gfx_input_push( GFX_EVENT_KEY_UP, key, 0, 0, x_mods( ev.xkey.state ) );
+				}
+				break;
+			case KeyPress:
+			{
+				char buf[16];
+				KeySym ks;
+				int m = x_mods( ev.xkey.state ), key = x_key( xl.f_LookupKeysym( &ev.xkey, 0 ) ), n, i;
+				if ( key )
+					gfx_input_push( GFX_EVENT_KEY_DOWN, key, repeat_next, 0, m );
+				repeat_next = 0;
+				if ( ( m & GFX_MOD_SUPER ) || ( ( m & GFX_MOD_CTRL ) && !( m & GFX_MOD_ALT ) ) ) // a shortcut, not typing
+					break;
+				n = xl.f_LookupString( &ev.xkey, buf, (int)sizeof( buf ), &ks, NULL );
+				for ( i = 0; i < n; i++ ) // Latin-1: the window has no input method; the page delivers any character
+					if ( (unsigned char)buf[i] >= 0x20 && (unsigned char)buf[i] != 0x7f )
+						gfx_input_push( GFX_EVENT_TEXT, (unsigned char)buf[i], 0, 0, 0 );
+				break;
+			}
+			case FocusIn: gfx_input_push( GFX_EVENT_FOCUS, 1, 0, 0, 0 ); break;
+			case FocusOut: gfx_input_push( GFX_EVENT_FOCUS, 0, 0, 0, 0 ); break;
+			default: break;
+		}
 	}
 }
 
@@ -906,6 +1009,11 @@ static void gl_read( uint8_t* rgba )
 	glReadPixels( 0, 0, g_w, g_h, GL_RGBA, GL_UNSIGNED_BYTE, rgba );
 }
 
+static void gl_poll( void )
+{
+	x_pump();
+}
+
 const GfxBackend gfx_backend_gl = {
-	"gl", GFX_BACKEND_GL, gl_init, gl_shutdown, gl_windowed, gl_texture_create, gl_texture_update, gl_texture_free, gl_frame, gl_present, gl_read,
+	"gl", GFX_BACKEND_GL, gl_init, gl_shutdown, gl_windowed, gl_texture_create, gl_texture_update, gl_texture_free, gl_frame, gl_present, gl_read, gl_poll,
 };

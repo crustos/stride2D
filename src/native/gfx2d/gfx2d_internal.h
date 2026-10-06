@@ -67,7 +67,13 @@ typedef struct GfxBackend
 	void ( *frame )( const GfxFrame* f );			// clear to the background, then run the commands
 	int ( *present )( void );						// shows the frame; 1 while the game should go on, 0 once the window is closed
 	void ( *read )( uint8_t* rgba );				// the last frame
+	void ( *poll )( void );							// may be NULL: takes what the window or page has received and gfx_input_push()es it
 } GfxBackend;
+
+// For a backend: queue an input event (the five ints of gfx_poll_event). Returns 0 if the queue is full.
+int gfx_input_push( int type, int a, int b, int c, int d );
+// For a backend: the window was closed.
+void gfx_input_close( void );
 
 // Backends. Which of them exist in a build is a compile-time choice (GFX_HAVE_SOFT, GFX_HAVE_GL, GFX_HAVE_WEB).
 extern const GfxBackend gfx_backend_soft;

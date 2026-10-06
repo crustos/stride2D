@@ -11,6 +11,9 @@
 
 // ---- state --------------------------------------------------------------------------------------------------------------------------
 
+static int g_events[GFX_MAX_EVENTS][5];
+static int g_ev_head, g_ev_count, g_ev_dropped;
+
 static const GfxBackend* g_be;
 static int g_ready;
 static int g_w, g_h;
@@ -133,6 +136,7 @@ int gfx_init( int width, int height )
 	g_open = g_have_frame = g_stale = 0;
 	g_ninst = g_nverts = g_ncmds = 0;
 	g_running = 1;
+	g_ev_head = g_ev_count = g_ev_dropped = 0;
 	g_st_calls = g_st_sprites = g_st_vertices = g_st_bytes = g_st_frames = 0;
 	g_ready = 1;
 	return 1;
@@ -428,6 +432,54 @@ int gfx_stat( int which )
 		case GFX_STAT_BYTES_UPLOADED: return g_st_bytes;
 		case GFX_STAT_WINDOWED: return g_ready && g_be->windowed() ? 1 : 0;
 		case GFX_STAT_FRAMES: return g_st_frames;
+		case GFX_STAT_EVENTS_DROPPED: return g_ev_dropped;
 		default: return 0;
 	}
+}
+
+// ---- input --------------------------------------------------------------------------------------------------------------------------------
+
+int gfx_input_push( int type, int a, int b, int c, int d )
+{
+	int* e;
+	if ( g_ev_count >= GFX_MAX_EVENTS )
+	{
+		g_ev_dropped++;
+		return 0;
+	}
+	e = g_events[( g_ev_head + g_ev_count ) % GFX_MAX_EVENTS];
+	e[0] = type;
+	e[1] = a;
+	e[2] = b;
+	e[3] = c;
+	e[4] = d;
+	g_ev_count++;
+	return 1;
+}
+
+void gfx_input_close( void )
+{
+	g_running = 0;
+	gfx_input_push( GFX_EVENT_CLOSE, 0, 0, 0, 0 );
+}
+
+int gfx_poll_event( int* out5 )
+{
+	if ( !g_ready || out5 == NULL )
+		return 0;
+	if ( g_ev_count == 0 && g_be->poll != NULL )
+		g_be->poll();
+	if ( g_ev_count == 0 )
+		return 0;
+	memcpy( out5, g_events[g_ev_head], 5 * sizeof( int ) );
+	g_ev_head = ( g_ev_head + 1 ) % GFX_MAX_EVENTS;
+	g_ev_count--;
+	return 1;
+}
+
+int gfx_inject_event( int type, int a, int b, int c, int d )
+{
+	if ( !g_ready || type < GFX_EVENT_MOUSE_MOVE || type > GFX_EVENT_CLOSE )
+		return 0;
+	return gfx_input_push( type, a, b, c, d );
 }

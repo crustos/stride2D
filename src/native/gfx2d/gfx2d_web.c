@@ -9,6 +9,7 @@
 //     void gfx_web_texture_free(int id)
 //     void gfx_web_frame(const void* cmds, int ncmds, const void* inst, int ninst, const void* verts, int nverts,
 //                        float left, float bottom, float right, float top, float bg_r, float bg_g, float bg_b)
+//     int  gfx_web_poll(int* out5)          the oldest input event the page has received, as the five ints of gfx_poll_event; 0 if there is none
 //     void gfx_web_read(void* rgba)         the canvas as just drawn, RGBA, rows bottom to top. WebGPU cannot be read at once: it gives the newest
 //                                           picture that has come back from the GPU, a frame or more behind (black until the first)
 //
@@ -29,6 +30,7 @@ WEB_IMPORT( gfx_web_frame )
 void gfx_web_frame( const void* cmds, int ncmds, const void* inst, int ninst, const void* verts, int nverts, float l, float b, float r, float t, float cr,
 					float cg, float cb );
 WEB_IMPORT( gfx_web_read ) void gfx_web_read( void* rgba );
+WEB_IMPORT( gfx_web_poll ) int gfx_web_poll( int* out5 );
 
 static int web_init( int width, int height )
 {
@@ -79,6 +81,14 @@ static void web_read( uint8_t* rgba )
 	gfx_web_read( rgba );
 }
 
+static void web_poll( void )
+{
+	int e[5], n = 0;
+	while ( n++ < GFX_MAX_EVENTS && gfx_web_poll( e ) )
+		gfx_input_push( e[0], e[1], e[2], e[3], e[4] );
+}
+
 GfxBackend gfx_backend_web = {
 	"web", GFX_BACKEND_WEBGL2, web_init, web_shutdown, web_windowed, web_texture_create, web_texture_update, web_texture_free, web_frame, web_present, web_read,
+	web_poll,
 };
