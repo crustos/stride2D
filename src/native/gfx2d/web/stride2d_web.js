@@ -492,6 +492,67 @@ function makeWasi(memory, log, exit) {
 
 // ---- the page's entry point ---------------------------------------------------------------------------------------------------------
 
+// ---- input -------------------------------------------------------------------------------------------------------------------------------------------
+// The page's events as the five ints gfx2d.h describes ([type, a, b, c, d]; positions in canvas pixels, y from the top), queued here until the module asks
+// for them with gfx_web_poll. Keys are named by what they are (event.code), not by the text they make, as in gfx2d.h; the text is its own event.
+const KEYS = {
+  Escape: 256, Enter: 257, NumpadEnter: 257, Tab: 258, Backspace: 259, Insert: 260, Delete: 261, ArrowRight: 262, ArrowLeft: 263, ArrowDown: 264, ArrowUp: 265,
+  PageUp: 266, PageDown: 267, Home: 268, End: 269, ShiftLeft: 340, ControlLeft: 341, AltLeft: 342, MetaLeft: 343, ShiftRight: 344, ControlRight: 345,
+  AltRight: 346, MetaRight: 347, Space: 32, Minus: 45, Equal: 61, Comma: 44, Period: 46, Slash: 47, Semicolon: 59, Quote: 39, Backquote: 96,
+  BracketLeft: 91, BracketRight: 93, Backslash: 92,
+};
+function keyOf(e) {
+  const c = e.code;
+  if (KEYS[c] !== undefined) return KEYS[c];
+  let m;
+  if ((m = /^Key([A-Z])$/.exec(c))) return m[1].charCodeAt(0);
+  if ((m = /^Digit([0-9])$/.exec(c))) return m[1].charCodeAt(0);
+  if ((m = /^F([0-9]{1,2})$/.exec(c)) && +m[1] >= 1 && +m[1] <= 12) return 290 + (+m[1]) - 1;
+  return 0;
+}
+function makeInput(canvas, memory) {
+  const q = [];
+  const mods = (e) => (e.shiftKey ? 1 : 0) | (e.ctrlKey ? 2 : 0) | (e.altKey ? 4 : 0) | (e.metaKey ? 8 : 0);
+  const pos = (e) => {
+    const r = canvas.getBoundingClientRect();
+    return [Math.floor((e.clientX - r.left) * canvas.width / r.width), Math.floor((e.clientY - r.top) * canvas.height / r.height)];
+  };
+  canvas.tabIndex = 0;                                       // so it can have the keyboard
+  canvas.style.outline = "none";
+  canvas.addEventListener("contextmenu", (e) => e.preventDefault());
+  canvas.addEventListener("pointermove", (e) => { const [x, y] = pos(e); q.push([1, x, y, 0, mods(e)]); });
+  canvas.addEventListener("pointerdown", (e) => {
+    canvas.focus();
+    try { canvas.setPointerCapture(e.pointerId); } catch {}
+    const [x, y] = pos(e); q.push([2, x, y, e.button === 1 ? 1 : e.button === 2 ? 2 : 0, mods(e)]);
+  });
+  canvas.addEventListener("pointerup", (e) => { const [x, y] = pos(e); q.push([3, x, y, e.button === 1 ? 1 : e.button === 2 ? 2 : 0, mods(e)]); });
+  canvas.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    const k = e.deltaMode === 0 ? 1 / 100 : e.deltaMode === 1 ? 1 / 3 : 1;     // pixels, lines or pages -> notches (a notch is about 100 pixels, 3 lines)
+    const [x, y] = pos(e);
+    q.push([4, x, y, Math.round(e.deltaX * k * 120), Math.round(-e.deltaY * k * 120)]);
+  }, { passive: false });
+  canvas.addEventListener("keydown", (e) => {
+    const k = keyOf(e);
+    if (k) { q.push([5, k, e.repeat ? 1 : 0, 0, mods(e)]); e.preventDefault(); }
+    const shortcut = e.metaKey || (e.ctrlKey && !e.altKey);
+    if (!shortcut && !e.isComposing && e.key && [...e.key].length === 1) q.push([7, e.key.codePointAt(0), 0, 0, 0]);
+  });
+  canvas.addEventListener("keyup", (e) => { const k = keyOf(e); if (k) { q.push([6, k, 0, 0, mods(e)]); e.preventDefault(); } });
+  canvas.addEventListener("focus", () => q.push([8, 1, 0, 0, 0]));
+  canvas.addEventListener("blur", () => q.push([8, 0, 0, 0, 0]));
+  return {
+    queue: q,
+    poll(ptr) {
+      const e = q.shift();
+      if (!e) return 0;
+      new Int32Array(memory().buffer, ptr, 5).set(e);
+      return 1;
+    },
+  };
+}
+
 export async function startStride2D({ wasm, canvas, log = console.log, manual = false, gfx = "auto" }) {
   let mem = null;
   const memory = () => mem;
@@ -499,9 +560,10 @@ export async function startStride2D({ wasm, canvas, log = console.log, manual = 
   if (gfx === "auto" || gfx === "webgpu") backend = await makeGfxGPU(canvas, memory, log);
   if (!backend && gfx === "webgpu") log("webgpu requested but not available here: using WebGL2");
   if (!backend) backend = makeGfxGL(canvas, memory, log);
+  const input = makeInput(canvas, memory);
   const imports = {
     wasi_snapshot_preview1: makeWasi(memory, log, (c) => { throw new Error("exit " + c); }),
-    gfx: backend.imports,
+    gfx: { ...backend.imports, gfx_web_poll: (ptr) => input.poll(ptr) },
   };
   let instance;
   try {
@@ -512,7 +574,7 @@ export async function startStride2D({ wasm, canvas, log = console.log, manual = 
   const x = instance.exports;
   mem = x.memory;
   if (x._initialize) x._initialize();
-  const state = { frame: 0, exports: x, error: null, backend: backend.kind, readPixels: backend.read, gfx: backend };   // gfx: keeps the WebGPU adapter reachable
+  const state = { frame: 0, exports: x, error: null, input, backend: backend.kind, readPixels: backend.read, gfx: backend };   // gfx: keeps the WebGPU adapter reachable
   const rc = x.stride2d_init();
   if (rc !== 0) { state.error = "stride2d_init returned " + rc; log(state.error); return state; }
   state.step = (n = 1) => { for (let i = 0; i < n; i++) { x.stride2d_frame(); state.frame++; } return state.frame; };
