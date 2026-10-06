@@ -62,6 +62,18 @@ def build(out=None, cc=None, gl=True, x11=True, force=False, quiet=False):
     tsrc = [os.path.join(test, "driver.c"), os.path.join(test, "scene.c")]
     if force or newer(res["driver"], tsrc + [res["static"]] + hdrs):
         sh([cc, "-std=gnu99", "-O2", "-ffp-contract=off", "-o", res["driver"]] + tsrc + [res["static"], "-ldl", "-lm"])
+    for name in ("input_test", "input_driver"):
+        exe = os.path.join(out, "gfx_" + name)
+        if force or newer(exe, [os.path.join(test, name + ".c"), res["static"]] + hdrs):
+            sh([cc, "-std=gnu99", "-O2", "-o", exe, os.path.join(test, name + ".c"), res["static"], "-ldl", "-lm"])
+        res[name] = exe
+    # X11 helper that sends input to the window (needs the X11 headers and library: left out where they are not)
+    if x11 and gl and os.path.exists("/usr/include/X11/Xlib.h"):
+        exe = os.path.join(out, "x11_input")
+        if force or newer(exe, [os.path.join(test, "x11_input.c")]):
+            r = subprocess.run([cc, "-o", exe, os.path.join(test, "x11_input.c"), "-lX11"], capture_output=True)
+            if r.returncode == 0: res["x11_input"] = exe
+        else: res["x11_input"] = exe
     # test helpers (LD_PRELOAD shim and window closer); they need only libdl / the X11 library at run time
     nodl = os.path.join(out, "nodl.so")
     if force or newer(nodl, [os.path.join(test, "nodl.c")]):

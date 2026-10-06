@@ -8,7 +8,7 @@ WebAssembly toolchain are there) WebGL2 and WebGPU against the CPU one. A check 
 Needs numpy and Pillow for the comparisons. --web adds the browser checks (clang + wasi-libc, node + playwright-core, Chromium; WebGPU also xvfb-run + lavapipe).
 Exit code 1 if any check failed.
 """
-import argparse, os, shutil, subprocess, sys, tempfile
+import argparse, json, os, shutil, subprocess, sys, tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -40,6 +40,34 @@ def compare(a, b, mean_max, big_max):
     r = subprocess.run([sys.executable, os.path.join(HERE, "gfx_compare.py"), a, b, "--mean-max", str(mean_max), "--big-max", str(big_max)],
                        capture_output=True, text=True)
     return r.returncode == 0, (r.stdout + r.stderr).strip().replace("\n", " ")[:160]
+
+
+# What a window must deliver for x11_input's fixed sequence (move, click, wheel up and down, a, Shift+A, Enter, Left, Escape): [type, a, b, c, d]
+X11_EXPECT = [[1, 40, 30, 0, 0], [2, 40, 30, 0, 0], [3, 40, 30, 0, 0], [4, 40, 30, 0, 120], [4, 40, 30, 0, -120],
+              [5, 65, 0, 0, 0], [7, 97, 0, 0, 0], [6, 65, 0, 0, 0], [5, 65, 0, 0, 1], [7, 65, 0, 0, 0], [6, 65, 0, 0, 1],
+              [5, 257, 0, 0, 0], [6, 257, 0, 0, 0], [5, 263, 0, 0, 0], [6, 263, 0, 0, 0], [5, 256, 0, 0, 0]]
+# and what a page must deliver for the same input from a browser (which also reports the Shift key itself, and the focus the click gives the canvas)
+WEB_EXPECT = [[1, 40, 30, 0, 0], [8, 1, 0, 0, 0], [2, 40, 30, 0, 0], [3, 40, 30, 0, 0], [4, 40, 30, 0, 120],
+              [5, 65, 0, 0, 0], [7, 97, 0, 0, 0], [6, 65, 0, 0, 0],
+              [5, 340, 0, 0, 1], [5, 65, 0, 0, 1], [7, 65, 0, 0, 0], [6, 65, 0, 0, 1], [6, 340, 0, 0, 0],
+              [5, 257, 0, 0, 0], [6, 257, 0, 0, 0], [5, 263, 0, 0, 0], [6, 263, 0, 0, 0], [5, 256, 0, 0, 0], [6, 256, 0, 0, 0]]
+
+
+def native_input(work, libs):
+    exe = libs["input_test"]
+    for be in ("soft", "gl"):
+        e = dict(os.environ, STRIDE2D_HEADLESS="1", STRIDE2D_GFX=be)
+        r = subprocess.run([exe], cwd=work, env=e, capture_output=True, text=True)
+        if r.returncode and "init failed" in r.stdout and be == "gl": report("input queue (gl)", "skip", "no GL here"); continue
+        report("input queue (%s)" % be, "ok" if r.returncode == 0 and "input ok" in r.stdout else "FAIL", (r.stdout.strip().splitlines() or [""])[-1][:100])
+    if "x11_input" not in libs or not shutil.which("xvfb-run"):
+        return report("window input (X11)", "skip", "needs xvfb-run and the X11 headers")
+    sh = "%s 8 > ev.txt & sleep 1.5; %s 5; wait" % (libs["input_driver"], libs["x11_input"])
+    r = subprocess.run(["xvfb-run", "-a", "bash", "-c", sh], cwd=work, capture_output=True, text=True, timeout=60, env=dict(os.environ, STRIDE2D_GFX="gl"))
+    txt = open(os.path.join(work, "ev.txt")).read() if os.path.exists(os.path.join(work, "ev.txt")) else ""
+    if "windowed=1" not in txt: return report("window input (X11)", "skip", "no GL window under xvfb")
+    got = [[int(v) for v in l.split()[1:]] for l in txt.splitlines() if l.startswith("ev ")]
+    report("window input (X11)", "ok" if got == X11_EXPECT else "FAIL", "" if got == X11_EXPECT else "got %s" % got[:20])
 
 
 def native(work, libs):
@@ -95,6 +123,14 @@ def web(work, soft, keep):
         if r.returncode: report(api + " vs soft", "FAIL", line[:150]); continue
         ok, msg = compare(soft, os.path.join(work, api + ".ppm"), 0.5, 0.5)
         report(api + " vs soft", "ok" if ok else "FAIL", msg)
+        cmd = [c for c in cmd if c != "--out" and not c.endswith(api + ".ppm")] + ["--input"]
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=240)
+        try:
+            res = json.loads((r.stdout.strip().splitlines() or ["{}"])[-1])
+        except ValueError:
+            res = {}
+        got = res.get("events")
+        report(api + " input", "ok" if got == WEB_EXPECT else "FAIL", "" if got == WEB_EXPECT else "got %s" % (got if got is not None else r.stdout[-150:]))
 
 
 def main():
@@ -108,6 +144,7 @@ def main():
     libs = gfx_build.build(quiet=True)
     work = tempfile.mkdtemp(prefix="gfx_test_")
     try:
+        native_input(work, libs)
         soft = native(work, libs)
         if a.web and soft: web(work, soft, a.keep)
     finally:

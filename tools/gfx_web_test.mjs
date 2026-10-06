@@ -23,8 +23,9 @@ function arg(name, dflt) {
 }
 const dir = arg("dir"), gfx = arg("gfx", "webgl2"), frames = parseInt(arg("frames", "1"), 10), out = arg("out");
 const hardware = arg("hardware", false);
+const input = arg("input", false);       // instead of a picture: send the page mouse and keyboard input, and print what the module read back (the "ev" lines it logs)
 let headed = arg("headed", false);
-if (!dir || !out) { console.error("usage: node gfx_web_test.mjs --dir PAGE_DIR --gfx webgl2|webgpu --frames N --out FILE.ppm [--hardware] [--headed]"); process.exit(2); }
+if (!dir || (!out && !input)) { console.error("usage: node gfx_web_test.mjs --dir PAGE_DIR --gfx webgl2|webgpu --frames N --out FILE.ppm [--hardware] [--headed]"); process.exit(2); }
 
 function loadPlaywright() {
   const roots = [process.env.PLAYWRIGHT_CORE_DIR];
@@ -83,6 +84,25 @@ try {
   page.on("pageerror", (e) => logs.push("pageerror: " + e.message));
   await page.goto(`http://localhost:${server.address().port}/index.html?gfx=${gfx}&manual=1`);
   await page.waitForFunction(() => window.stride2dReady === true || (window.stride2d && window.stride2d.error), null, { timeout: 60000 });
+  if (input) {
+    const box = await page.locator("canvas").boundingBox();
+    const at = (x, y) => [box.x + x, box.y + y];
+    await page.mouse.move(...at(40, 30));
+    await page.mouse.down();
+    await page.mouse.up();
+    await page.mouse.wheel(0, -100);                     // a notch up: dy +120
+    await page.keyboard.press("a");
+    await page.keyboard.press("Shift+A");
+    await page.keyboard.press("Enter");
+    await page.keyboard.press("ArrowLeft");
+    await page.keyboard.press("Escape");
+    await page.evaluate(() => window.stride2d.step(2));
+    const shown = (await page.evaluate(() => document.getElementById("log").textContent)).split("\n");   // the page prints the module's stdout there
+    const events = shown.filter((l) => l.startsWith("ev ")).map((l) => l.split(" ").slice(1).map(Number));
+    console.log(JSON.stringify({ ok: true, backend: await page.evaluate(() => window.stride2d.backend), events, logs: logs.filter((l) => !l.startsWith("ev ")) }));
+    await browser.close(); server.close();
+    process.exit(0);
+  }
   const info = await page.evaluate(async (n) => {
     const s = window.stride2d;
     if (s.error) return { error: s.error };
