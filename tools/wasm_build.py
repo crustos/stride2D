@@ -170,6 +170,7 @@ def link_web(out_dir, main_class):
     # player.c has no main() to call: the page drives it, so it is a reactor and the translated main (if any) is unused
     cmd = ([c.wasm_compiler()] + _cflags(c) + ["-DGFX_HAVE_WEB=1", "-I.", "-I" + GFX_DIR, "-o", module, "player.c", "web_entry.c",
            os.path.join(GFX_DIR, "gfx2d_core.c"), os.path.join(GFX_DIR, "gfx2d_web.c"),
+           os.path.join(GFX_DIR, "gfx2d_font.c"), os.path.join(GFX_DIR, "gfx2d_font_data.c"),
            "-L" + natives, "-lstride2d_box2d_static", "-lbox2d", "-lm"]
            + ["-fuse-ld=lld", "-mexec-model=reactor", "-Wl,--allow-undefined", "-Wl,-z,stack-size=8388608"])
     r = subprocess.run(cmd, cwd=out_dir, capture_output=True, text=True)

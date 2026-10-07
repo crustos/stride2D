@@ -70,6 +70,61 @@ def native_input(work, libs):
     report("window input (X11)", "ok" if got == X11_EXPECT else "FAIL", "" if got == X11_EXPECT else "got %s" % got[:20])
 
 
+def native_clip(work, libs):
+    """The clip scene: soft is repeatable and cuts where it should (the hidden tile and the area outside every clip are empty); GL draws the same."""
+    exe = libs["clip_test"]
+    pics = {}
+    for be in ("soft", "gl"):
+        r = subprocess.run([exe], cwd=work, env=dict(os.environ, STRIDE2D_GFX=be), capture_output=True, text=True)
+        if r.returncode:
+            report("clip scene (%s)" % be, "skip" if be == "gl" else "FAIL", "no GL here" if be == "gl" else r.stdout[-120:]); continue
+        pics[be] = os.path.join(work, "clip_%s.ppm" % be)
+        shutil.move(os.path.join(work, "frame_0000.ppm"), pics[be])
+        if be == "soft":
+            from PIL import Image
+            im = Image.open(pics[be]).convert("RGB")
+            bg = im.getpixel((2, 2))
+            # tile at world (300, 40) is hidden (clip 0x0), the tile at (60, 100) is cut to rows 90-120, so the rows under that band must be the background
+            hidden = [im.getpixel((x, y)) for x in range(266, 334, 4) for y in range(190, 226, 4)]
+            outside = [im.getpixel((x, y)) for x in range(30, 90, 3) for y in range(126, 152, 2)]
+            report("clip hides what it should", "ok" if all(p == bg for p in hidden) and all(p == bg for p in outside) else "FAIL")
+            top = [im.getpixel((x, y)) for x in range(30, 90, 3) for y in range(60 - 8, 60 + 8, 3)]
+            report("no clip at the frame's start", "ok" if any(p != bg for p in top) else "FAIL")
+    if "gl" in pics:
+        ok, msg = compare(pics["soft"], pics["gl"], 0.1, 0.1)
+        report("clip scene gl vs soft", "ok" if ok else "FAIL", msg)
+    return pics.get("soft")
+
+
+def native_font(work, libs):
+    """The font scene: the soft picture is repeatable, has text where text should be, and GL draws the same."""
+    exe = libs["font_test"]
+    pics = {}
+    for be in ("soft", "gl"):
+        r = subprocess.run([exe], cwd=work, env=dict(os.environ, STRIDE2D_GFX=be), capture_output=True, text=True)
+        if r.returncode:
+            report("font scene (%s)" % be, "skip" if be == "gl" else "FAIL", "no GL here" if be == "gl" else r.stdout[-120:]); continue
+        pics[be] = os.path.join(work, "font_%s.ppm" % be)
+        shutil.move(os.path.join(work, "frame_0000.ppm"), pics[be])
+        if be == "soft":
+            hs = [l for l in r.stdout.splitlines() if l.startswith("hash")]
+            r2 = subprocess.run([exe], cwd=work, env=dict(os.environ, STRIDE2D_GFX=be), capture_output=True, text=True)
+            hs2 = [l for l in r2.stdout.splitlines() if l.startswith("hash")]
+            report("font scene is deterministic", "ok" if hs and hs == hs2 else "FAIL", "%s vs %s" % (hs, hs2))
+            nums = [l for l in r.stdout.splitlines() if l.startswith("font ")]
+            want = ["size 14", "size 20", "size 28", "size 40"]
+            report("font metrics", "ok" if len(nums) == 4 and all(w in n for w, n in zip(want, nums)) and all("?-fallback 0" in n for n in nums) else "FAIL", str(nums)[:100])
+            from PIL import Image
+            im = Image.open(pics[be]).convert("L")
+            band = im.crop((0, 8, 400, 28)).tobytes()   # the first line of text: bright pixels where the glyphs are, the background elsewhere
+            lit = sum(1 for v in band if v > 200)
+            report("font scene has text", "ok" if 300 < lit < 3000 else "FAIL", "%d bright pixels" % lit)
+    if "gl" in pics:
+        ok, msg = compare(pics["soft"], pics["gl"], 0.1, 0.1)
+        report("font scene gl vs soft", "ok" if ok else "FAIL", msg)
+    return pics.get("soft")
+
+
 def native(work, libs):
     exe = libs["driver"]
     rc, be, h1, stats, out = drive(exe, work, {"STRIDE2D_GFX": "soft"})
@@ -98,7 +153,7 @@ def native(work, libs):
     return soft
 
 
-def web(work, soft, keep):
+def web(work, soft, keep, fsoft=None, csoft=None):
     need = {t: shutil.which(t) for t in ("clang", "node")}
     if not all(need.values()):
         return report("web (wasm build)", "skip", "needs clang and node")
@@ -131,6 +186,29 @@ def web(work, soft, keep):
             res = {}
         got = res.get("events")
         report(api + " input", "ok" if got == WEB_EXPECT else "FAIL", "" if got == WEB_EXPECT else "got %s" % (got if got is not None else r.stdout[-150:]))
+    for name, ref, scene_files in (("font", fsoft, ("font_scene.c",)), ("clip", csoft, ("clip_scene.c",))):
+        if ref: web_scene(work, name, ref, scene_files)
+
+
+def web_scene(work, name, ref, scene_files):
+    fpage = os.path.join(work, name + "_page")
+    os.makedirs(fpage)
+    fsrcs = [os.path.join(SRC, f) for f in ("gfx2d_core.c", "gfx2d_web.c", "gfx2d_font.c", "gfx2d_font_data.c")] + [os.path.join(SRC, "test", f) for f in scene_files + ("web_entry.c",)]
+    r = subprocess.run(["clang", "--target=wasm32-wasi", "-mexec-model=reactor", "-O2", "-ffp-contract=off", "-DGFX_HAVE_WEB=1", "-fuse-ld=lld", "-o",
+                        os.path.join(fpage, "stride2d-player.wasm")] + fsrcs + ["-Wl,--allow-undefined"], capture_output=True, text=True)
+    if r.returncode: return report(name + " scene (wasm build)", "FAIL", r.stderr.strip()[-150:])
+    for f in ("index.html", "stride2d_web.js"): shutil.copy(os.path.join(SRC, "web", f), fpage)
+    for api in ("webgl2", "webgpu"):
+        cmd = ["node", os.path.join(HERE, "gfx_web_test.mjs"), "--dir", fpage, "--gfx", api, "--frames", "2", "--out", os.path.join(work, name + "_" + api + ".ppm")]
+        if api == "webgpu":
+            if not shutil.which("xvfb-run") and not os.environ.get("DISPLAY"): continue
+            if not os.environ.get("DISPLAY"): cmd = ["xvfb-run", "-a"] + cmd
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=240)
+        line = (r.stdout.strip().splitlines() or [""])[-1]
+        if r.returncode in (3, 4): report("%s scene %s" % (name, api), "skip", line[:120]); continue
+        if r.returncode: report("%s scene %s" % (name, api), "FAIL", line[:150]); continue
+        ok, msg = compare(ref, os.path.join(work, name + "_" + api + ".ppm"), 0.5, 0.5)
+        report("%s scene %s vs soft" % (name, api), "ok" if ok else "FAIL", msg)
 
 
 def main():
@@ -146,7 +224,9 @@ def main():
     try:
         native_input(work, libs)
         soft = native(work, libs)
-        if a.web and soft: web(work, soft, a.keep)
+        fsoft = native_font(work, libs)
+        csoft = native_clip(work, libs)
+        if a.web and soft: web(work, soft, a.keep, fsoft, csoft)
     finally:
         if a.keep: print("kept " + work)
         else: shutil.rmtree(work, ignore_errors=True)

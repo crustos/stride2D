@@ -11,7 +11,7 @@ import argparse, os, shutil, subprocess, sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SRC = os.path.join(ROOT, "src", "native", "gfx2d")
-CORE = ["gfx2d_core.c", "gfx2d_soft.c"]
+CORE = ["gfx2d_core.c", "gfx2d_soft.c", "gfx2d_font.c", "gfx2d_font_data.c"]
 FLAGS = ["-O2", "-g", "-ffp-contract=off", "-Wall", "-Wno-unused-function", "-fvisibility=default"]
 
 
@@ -62,10 +62,11 @@ def build(out=None, cc=None, gl=True, x11=True, force=False, quiet=False):
     tsrc = [os.path.join(test, "driver.c"), os.path.join(test, "scene.c")]
     if force or newer(res["driver"], tsrc + [res["static"]] + hdrs):
         sh([cc, "-std=gnu99", "-O2", "-ffp-contract=off", "-o", res["driver"]] + tsrc + [res["static"], "-ldl", "-lm"])
-    for name in ("input_test", "input_driver"):
+    for name in ("input_test", "input_driver", "font_test", "clip_test"):
         exe = os.path.join(out, "gfx_" + name)
-        if force or newer(exe, [os.path.join(test, name + ".c"), res["static"]] + hdrs):
-            sh([cc, "-std=gnu99", "-O2", "-o", exe, os.path.join(test, name + ".c"), res["static"], "-ldl", "-lm"])
+        tc = [os.path.join(test, "font_test.c" if name == "clip_test" else name + ".c")] + ([os.path.join(test, name[:4] + "_scene.c")] if name in ("font_test", "clip_test") else [])
+        if force or newer(exe, tc + [res["static"]] + hdrs):
+            sh([cc, "-std=gnu99", "-O2", "-ffp-contract=off", "-o", exe] + tc + [res["static"], "-ldl", "-lm"])
         res[name] = exe
     # X11 helper that sends input to the window (needs the X11 headers and library: left out where they are not)
     if x11 and gl and os.path.exists("/usr/include/X11/Xlib.h"):

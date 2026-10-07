@@ -54,7 +54,7 @@ def ccs2c_module():
     return mod
 
 
-FEATURES = {"terrain": "Stride2D.Terrain", "destruction": "Stride2D.Destruction"}     # a Feature="x" item of Stride2D.csproj is in a game that mentions this namespace
+FEATURES = {"terrain": "Stride2D.Terrain", "destruction": "Stride2D.Destruction", "ui": "Stride2D.UI"}     # a Feature="x" item of Stride2D.csproj is in a game that mentions this namespace
 
 
 def runtime_files(game=None):
@@ -133,8 +133,8 @@ GFX_H = os.path.join(ROOT, "src", "native", "gfx2d", "gfx2d.h")
 
 
 def uses_gfx(game):
-    """True if a game file mentions the renderer's namespace: then the gfx2d bindings are generated and libgfx2d is linked."""
-    return any("Stride2D.Native.Gfx2D" in open(p, encoding="utf-8-sig").read() for p in game)
+    """True if a game file mentions the renderer's namespace (or the UI's, which draws with it): then the gfx2d bindings are generated and libgfx2d is linked."""
+    return any("Stride2D.Native.Gfx2D" in t or "Stride2D.UI" in t for t in (open(p, encoding="utf-8-sig").read() for p in game))
 
 
 def generate_bindings(out_dir, gfx):
@@ -304,8 +304,12 @@ def run_dotnet_reference(game, out_dir):
                 '<ImplicitUsings>disable</ImplicitUsings><Nullable>disable</Nullable><NuGetAudit>false</NuGetAudit>'
                 '<AllowUnsafeBlocks>true</AllowUnsafeBlocks><EnableDefaultCompileItems>false</EnableDefaultCompileItems></PropertyGroup>\n'
                 '  <ItemGroup>\n%s\n  </ItemGroup>\n</Project>\n' % items)
+    libdirs = [NATIVE_DIR]
+    if uses_gfx(game):                      # the .NET run loads libgfx2d.so (the same C the player links), so it must be built and findable
+        import gfx_build
+        libdirs.append(os.path.dirname(gfx_build.build(quiet=True)["shared"]))
     env = dict(os.environ, DOTNET_CLI_TELEMETRY_OPTOUT="1", DOTNET_NOLOGO="1",
-               LD_LIBRARY_PATH=NATIVE_DIR + os.pathsep + os.environ.get("LD_LIBRARY_PATH", ""))
+               LD_LIBRARY_PATH=os.pathsep.join(libdirs + [os.environ.get("LD_LIBRARY_PATH", "")]))
     b = subprocess.run(["dotnet", "build", "-c", "Release", "-o", os.path.join(work, "bin"), proj], capture_output=True, text=True, env=env)
     if b.returncode != 0:
         return None, "the reference did not build under .NET:\n" + "\n".join(l for l in b.stdout.splitlines() if "error" in l)[:1500]
