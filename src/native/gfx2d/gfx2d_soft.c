@@ -21,6 +21,7 @@ typedef struct SoftTex
 static SoftTex g_tex[GFX_MAX_TEXTURES];
 static uint8_t* g_fb; // rows bottom to top, RGBA
 static int g_w, g_h;
+static int g_cx0, g_cx1, g_cy0, g_cy1; // the clip: columns cx0 .. cx1 and rows (from the BOTTOM) cy0 .. cy1, inclusive; empty if cx1 < cx0 or cy1 < cy0
 
 static float clamp01( float v )
 {
@@ -76,14 +77,14 @@ static void draw_sprite( const GfxFrame* f, const GfxInstance* s )
 	x1 = (int)ceilf( ( s->x + ex - f->left ) * sx );
 	y0 = (int)floorf( ( s->y - ey - f->bottom ) * sy );
 	y1 = (int)ceilf( ( s->y + ey - f->bottom ) * sy );
-	if ( x0 < 0 )
-		x0 = 0;
-	if ( y0 < 0 )
-		y0 = 0;
-	if ( x1 > f->width - 1 )
-		x1 = f->width - 1;
-	if ( y1 > f->height - 1 )
-		y1 = f->height - 1;
+	if ( x0 < g_cx0 )
+		x0 = g_cx0;
+	if ( y0 < g_cy0 )
+		y0 = g_cy0;
+	if ( x1 > g_cx1 )
+		x1 = g_cx1;
+	if ( y1 > g_cy1 )
+		y1 = g_cy1;
 	r = (float)( s->rgba & 255u ) * ( 1.f / 255.f );
 	g = (float)( ( s->rgba >> 8 ) & 255u ) * ( 1.f / 255.f );
 	b = (float)( ( s->rgba >> 16 ) & 255u ) * ( 1.f / 255.f );
@@ -200,14 +201,14 @@ static void draw_triangle( const GfxFrame* f, const GfxVertex* a, const GfxVerte
 	x1 = (int)ceilf( maxx );
 	y0 = (int)floorf( miny );
 	y1 = (int)ceilf( maxy );
-	if ( x0 < 0 )
-		x0 = 0;
-	if ( y0 < 0 )
-		y0 = 0;
-	if ( x1 > f->width - 1 )
-		x1 = f->width - 1;
-	if ( y1 > f->height - 1 )
-		y1 = f->height - 1;
+	if ( x0 < g_cx0 )
+		x0 = g_cx0;
+	if ( y0 < g_cy0 )
+		y0 = g_cy0;
+	if ( x1 > g_cx1 )
+		x1 = g_cx1;
+	if ( y1 > g_cy1 )
+		y1 = g_cy1;
 	own0 = owns_edge( bx, by, cx, cy ); // the edge opposite a
 	own1 = owns_edge( cx, cy, ax, ay ); // opposite b
 	own2 = owns_edge( ax, ay, bx, by ); // opposite c
@@ -316,11 +317,21 @@ static void soft_frame( const GfxFrame* f )
 		g_fb[i * 4 + 2] = cb;
 		g_fb[i * 4 + 3] = 255;
 	}
+	g_cx0 = g_cy0 = 0;
+	g_cx1 = f->width - 1;
+	g_cy1 = f->height - 1;
 	for ( c = 0; c < f->ncmds; c++ )
 	{
 		const GfxCmd* cmd = &f->cmds[c];
 		int k;
-		if ( cmd->kind == GFXCMD_SPRITES )
+		if ( cmd->kind == GFXCMD_CLIP )
+		{
+			g_cx0 = cmd->first & 0xffff;
+			g_cx1 = ( cmd->count & 0xffff ) - 1;
+			g_cy0 = f->height - ( ( cmd->count >> 16 ) & 0xffff ); // the rows are counted from the bottom here
+			g_cy1 = f->height - 1 - ( ( cmd->first >> 16 ) & 0xffff );
+		}
+		else if ( cmd->kind == GFXCMD_SPRITES )
 		{
 			for ( k = 0; k < cmd->count; k++ )
 				draw_sprite( f, &f->inst[cmd->first + k] );

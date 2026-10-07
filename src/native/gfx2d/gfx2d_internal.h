@@ -29,6 +29,8 @@ typedef struct GfxVertex
 
 #define GFXCMD_SPRITES 1   // draw instances [first, first + count)
 #define GFXCMD_TRIANGLES 2 // draw vertices [first, first + count) with `texture`
+#define GFXCMD_CLIP 3      // later draws only change pixels in a rectangle, in pixels from the TOP left, end exclusive: first = x0 | y0 << 16, count = x1 | y1 << 16
+                           // (0 <= x0 <= x1 <= width, likewise y); the whole picture is the state at the start of every frame
 
 typedef struct GfxCmd
 {

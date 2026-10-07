@@ -36,6 +36,7 @@ typedef ptrdiff_t GLsizeiptr, GLintptr;
 #define GL_TRIANGLES 0x0004
 #define GL_TRIANGLE_STRIP 0x0005
 #define GL_BLEND 0x0BE2
+#define GL_SCISSOR_TEST 0x0C11
 #define GL_ZERO 0
 #define GL_ONE 1
 #define GL_SRC_ALPHA 0x0302
@@ -79,6 +80,8 @@ typedef ptrdiff_t GLsizeiptr, GLintptr;
 	X( void, glClear, ( GLbitfield ) )                                                                                                                        \
 	X( void, glViewport, ( GLint, GLint, GLsizei, GLsizei ) )                                                                                                 \
 	X( void, glEnable, ( GLenum ) )                                                                                                                           \
+	X( void, glDisable, ( GLenum ) )                                                                                                                          \
+	X( void, glScissor, ( GLint, GLint, GLsizei, GLsizei ) )                                                                                                  \
 	X( void, glBlendFuncSeparate, ( GLenum, GLenum, GLenum, GLenum ) )                                                                                        \
 	X( GLuint, glCreateShader, ( GLenum ) )                                                                                                                   \
 	X( void, glShaderSource, ( GLuint, GLsizei, const GLchar* const*, const GLint* ) )                                                                        \
@@ -962,10 +965,17 @@ static void gl_frame( const GfxFrame* f )
 		glBindBuffer( GL_ARRAY_BUFFER, g_vert_buf );
 		glBufferSubData( GL_ARRAY_BUFFER, 0, (GLsizeiptr)f->nverts * GFX_VERTEX_BYTES, f->verts );
 	}
+	glDisable( GL_SCISSOR_TEST );
 	for ( c = 0; c < f->ncmds; c++ )
 	{
 		const GfxCmd* cmd = &f->cmds[c];
-		if ( cmd->kind == GFXCMD_SPRITES )
+		if ( cmd->kind == GFXCMD_CLIP )
+		{
+			int x0 = cmd->first & 0xffff, y0 = ( cmd->first >> 16 ) & 0xffff, x1 = cmd->count & 0xffff, y1 = ( cmd->count >> 16 ) & 0xffff;
+			glEnable( GL_SCISSOR_TEST );
+			glScissor( x0, f->height - y1, x1 - x0, y1 - y0 ); // GL counts rows from the bottom
+		}
+		else if ( cmd->kind == GFXCMD_SPRITES )
 		{
 			glUseProgram( g_sprite_prog );
 			glUniform4f( g_sprite_view, f->left, f->bottom, f->right, f->top );
@@ -984,6 +994,7 @@ static void gl_frame( const GfxFrame* f )
 			glDrawArrays( GL_TRIANGLES, cmd->first, cmd->count );
 		}
 	}
+	glDisable( GL_SCISSOR_TEST );
 	glBindVertexArray( 0 );
 }
 

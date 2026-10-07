@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "gfx2d_font.h"
 #include "gfx2d_internal.h"
 
 // ---- state --------------------------------------------------------------------------------------------------------------------------
@@ -31,6 +32,7 @@ static GfxVertex g_verts[GFX_MAX_VERTICES];
 static int g_nverts;
 static GfxCmd g_cmds[GFX_MAX_CMDS];
 static int g_ncmds;
+static int g_clip[4]; // x0, y0, x1, y1: the clip the commands so far have left in force
 
 typedef struct TexInfo
 {
@@ -70,6 +72,9 @@ static void open_frame( void )
 		return;
 	g_open = 1;
 	g_ninst = g_nverts = g_ncmds = 0;
+	g_clip[0] = g_clip[1] = 0;
+	g_clip[2] = g_w;
+	g_clip[3] = g_h;
 }
 
 // ---- backends ------------------------------------------------------------------------------------------------------------------------
@@ -151,6 +156,7 @@ void gfx_shutdown( void )
 		if ( g_tex[i].used )
 			g_be->texture_free( i );
 	g_be->texture_free( 0 );
+	gfx_font_reset();
 	g_be->shutdown();
 	free( g_pixels );
 	g_pixels = NULL;
@@ -313,10 +319,48 @@ int gfx_triangles( const float* vertices, int count, int texture )
 	return count;
 }
 
+int gfx_clip( int x, int y, int width, int height )
+{
+	int x0, y0, x1, y1;
+	GfxCmd* cmd;
+	if ( !g_ready )
+		return 0;
+	open_frame();
+	// the rectangle is cut to the picture; one with nothing in it (or none of it on the picture) hides everything that follows
+	x0 = x < 0 ? 0 : ( x > g_w ? g_w : x );
+	y0 = y < 0 ? 0 : ( y > g_h ? g_h : y );
+	x1 = width <= 0 ? x0 : ( (long long)x + width > g_w ? g_w : x + width );
+	y1 = height <= 0 ? y0 : ( (long long)y + height > g_h ? g_h : y + height );
+	if ( x1 < x0 )
+		x1 = x0;
+	if ( y1 < y0 )
+		y1 = y0;
+	if ( x0 == g_clip[0] && y0 == g_clip[1] && x1 == g_clip[2] && y1 == g_clip[3] )
+		return 1;
+	if ( g_ncmds >= GFX_MAX_CMDS )
+		return 0;
+	cmd = &g_cmds[g_ncmds++];
+	cmd->kind = GFXCMD_CLIP;
+	cmd->first = x0 | ( y0 << 16 );
+	cmd->count = x1 | ( y1 << 16 );
+	cmd->texture = 0;
+	g_clip[0] = x0;
+	g_clip[1] = y0;
+	g_clip[2] = x1;
+	g_clip[3] = y1;
+	return 1;
+}
+
+int gfx_clip_reset( void )
+{
+	return gfx_clip( 0, 0, g_w, g_h );
+}
+
 int gfx_end( void )
 {
 	GfxFrame f;
 	float half_w, half_h;
+	int i;
 	if ( !g_ready )
 		return 0;
 	open_frame(); // a frame with nothing in it still clears the picture
@@ -340,7 +384,10 @@ int gfx_end( void )
 	g_be->frame( &f );
 	g_running = g_be->present();
 
-	g_st_calls = g_ncmds;
+	g_st_calls = 0;
+	for ( i = 0; i < g_ncmds; i++ )
+		if ( g_cmds[i].kind != GFXCMD_CLIP )
+			g_st_calls++;
 	g_st_sprites = g_ninst;
 	g_st_vertices = g_nverts;
 	g_st_bytes = g_ninst * GFX_INSTANCE_BYTES + g_nverts * GFX_VERTEX_BYTES;

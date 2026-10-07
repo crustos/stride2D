@@ -180,6 +180,12 @@ GFX_API int gfx_sprites( GFX_IN_ARR const float *sprites, int count );
 // Draws `count` mesh vertices (a multiple of 3) with a texture (0: white); returns how many vertices it drew.
 GFX_API int gfx_triangles( GFX_IN_ARR const float *vertices, int count, int texture );
 
+// Limits what the draws after it change to the rectangle (x, y, width, height), in PIXELS from the top left of the picture (the way a screen and the UI's
+// layout are measured; the camera does not move it). It holds until the next gfx_clip or gfx_clip_reset, and each frame starts without one. A rectangle
+// is cut to the picture, and an empty one hides everything until the clip changes. It costs no draw call. Returns 1 (0 if the frame had no room).
+GFX_API int gfx_clip( int x, int y, int width, int height );
+GFX_API int gfx_clip_reset( void );
+
 GFX_API int gfx_end( void );
 
 // A frame of sprites only: gfx_begin, gfx_sprites, gfx_end. Returns how many sprites it drew.
@@ -201,6 +207,25 @@ GFX_API int gfx_stat( int which );
 // Writes the oldest queued event to out5 (five ints, above) and returns 1, or returns 0 with out5 untouched when there is none. It first lets the window or
 // the page deliver what it has received, so it works between frames; a game normally drains it once a frame.
 GFX_API int gfx_poll_event( GFX_OUT_ARR int *out5 );
+
+// ---- fonts -------------------------------------------------------------------------------------------------------------------------------
+//
+// The renderer carries bitmap fonts (DejaVu Sans, Latin-1; tools/font_bake.py), each baked at one pixel size, so text is sharp when it is drawn at a baked size and
+// is scaled (a little softer) at any other. A game lays a string out itself from these numbers: for each character a quad of the glyph's size, put at
+// (pen x + bearingX, baseline - bearingY) with the texture coordinates given, then the pen moves right by the advance. Kerning is not applied.
+//
+// Font `index` is 0 .. gfx_font_count() - 1, in increasing size. gfx_font_texture is the font's atlas (made on first use; 0 if there is no room): draw the
+// quads with gfx_triangles and that texture, with the text's colour as the vertices' tint.
+GFX_API int gfx_font_count( void );
+GFX_API int gfx_font_size( int index );
+GFX_API int gfx_font_texture( int index );
+
+// out4: ascent, descent (pixels above and below the baseline), the line height (ascent + descent), the size. Returns 1, or 0 for a bad index.
+GFX_API int gfx_font_metrics( int index, GFX_OUT_ARR float *out4 );
+
+// out9: u0, v0, u1, v1 (the glyph's box in the atlas: v = 0 is the TOP), width, height (pixels), bearingX, bearingY (from the pen on the baseline to the box's
+// left and TOP edge; y is UP), the advance. Returns 1, or 0 if the font has no such character (it then describes '?'; a bad index describes nothing).
+GFX_API int gfx_font_glyph( int index, int codepoint, GFX_OUT_ARR float *out9 );
 
 // Queues an event as if it had come from the window: what a test or a scripted demo uses, the same on every backend. Returns 1, or 0 if the queue was full
 // (and counts it in GFX_STAT_EVENTS_DROPPED). An unknown type or one before gfx_init is refused (0).
