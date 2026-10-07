@@ -67,4 +67,10 @@
     <Compile Include="src\destruction\Destruction2D.cs" Feature="destruction" />
   </ItemGroup>
 
+  <!-- The in-game UI draws with the renderer, whose C# bindings (GFX) are generated when a game is built (tools/gen_pb2.py --lib gfx2d), so a plain
+       `dotnet build` of this project leaves it out; a game that uses it adds the generated GFX.net.cs and builds with -p:Stride2DGfx=true. -->
+  <ItemGroup Label="In-game UI" Condition="'$(Stride2DGfx)' == 'true'">
+    <Compile Include="src\ui\UIText.cs" Feature="ui" />
+  </ItemGroup>
+
 </Project>

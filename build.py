@@ -18,6 +18,7 @@ llvm-ar, wasi-libc (apt install clang lld llvm wasi-libc libclang-rt-dev-wasm32)
 
   python3 build.py test [--sanitize] [--dna] [--wasm] [NAME..]      every folder of tests/ and samples/, native (or wasm) vs .NET (and under the sanitizers)
   python3 build.py gfx                  build the Gfx2D renderer (CPU, desktop OpenGL) into build/gfx: static + shared library and the test driver
+  python3 build.py ui-test              test src/ui on Mono (mono-mcs): the text layer against the C renderer and a Python oracle
   python3 build.py gfx-test [--wasm]    test it: CPU vs GL, and with --wasm (clang, node + playwright, Chromium) WebGL2 and WebGPU too
   python3 build.py bench [--avx2] [--cachegrind]   native physics benchmark (pyramid + circles); prints a state hash that must not change
   python3 build.py status | clean
@@ -135,6 +136,7 @@ def cmd_test(a):
 
 def cmd_gfx(a): run([sys.executable, os.path.join(ROOT, "tools", "gfx_build.py")])
 
+def cmd_ui_test(a): run([sys.executable, os.path.join(ROOT, "tools", "ui_test.py")])
 def cmd_gfx_test(a): run([sys.executable, os.path.join(ROOT, "tools", "gfx_test.py")] + (["--web"] if a.wasm else []))
 
 
@@ -153,7 +155,7 @@ def cmd_clean(a): shutil.rmtree(BUILD, ignore_errors=True); log("removed build/"
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("command", choices=["deps", "native", "ccsharp", "dotnet", "check", "player", "test", "bench", "gfx", "gfx-test", "status", "clean"])
+    ap.add_argument("command", choices=["deps", "native", "ccsharp", "dotnet", "check", "player", "test", "bench", "gfx", "gfx-test", "ui-test", "status", "clean"])
     ap.add_argument("game", nargs="?"); ap.add_argument("more", nargs="*", default=[])
     ap.add_argument("--avx2", action="store_true")
     ap.add_argument("--cachegrind", action="store_true")

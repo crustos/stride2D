@@ -21,7 +21,7 @@ It started as a fork of [Stride](https://github.com/stride3d/stride). The engine
 ## What does not exist yet
 
 - **No input or audio.** There is a renderer (below) and a window on X11 only; no keyboard or mouse, no sound. A window on Windows or macOS is not written (the CPU and WebGL/WebGPU backends are portable C and JS; the desktop GL path is Linux).
-- **The renderer's .NET and C# -> C paths are not yet run by the tests.** The C library, its four backends and the page are tested (`python3 build.py gfx-test`); the C# bindings it generates and `--web` are written but have only been checked against the generator, not translated or run.
+- **The renderer's C# bindings are checked by hand, not by `build.py test`.** The C library, its four backends and the page are tested (`python3 build.py gfx-test`). The C# side, `gfx_samples/Draw2D` and `gfx_samples/UIText2D`, was translated by CCSharp and run against the same game on .NET with `STRIDE2D_GFX=soft python3 tools/player_build.py gfx_samples/UIText2D --verify --run`: identical output, and the UI sample's picture is the C renderer's font scene (hash `55eb0199`). `--web` is written but has not been run.
 - **Terrain raises no collision events.** Terrain shapes carry no collider id, so contacts with them are not reported (contacts between fragments and other bodies are).
 - **Shattering needs a convex outline.** A concave one is refused.
 - **3D objects drawn in front of or behind 2D layers** is planned, not built.
@@ -90,6 +90,7 @@ scalar and SIMD paths, so the module prints what the native player and .NET prin
 
 ```
 python3 build.py gfx                  # build/gfx: libgfx2d_static.a, libgfx2d.so, a test driver
+python3 build.py ui-test               # src/ui on Mono against the renderer and a Python oracle
 python3 build.py gfx-test [--wasm]    # CPU determinism, GL vs CPU, no-GL fallback; with --wasm also WebGL2 and WebGPU in headless Chromium
 python3 tools/player_build.py gfx_samples/Draw2D --run     # a game that draws, native
 python3 tools/player_build.py gfx_samples/Draw2D --web     # the same game as a page: build/player/Draw2D-web/
@@ -102,6 +103,12 @@ A game that draws has a `static void Frame()` and `static int Init()` for the pa
 `gfx_poll_event` returns the window's or the page's input as five ints, `[type, a, b, c, d]`, oldest first (`GFX.PollEvent(int[] out5)` in C#): mouse move, button, wheel, key down and up, typed text, focus and close. Positions are picture pixels with y from the top, whatever the backend. A key is its ASCII code (a letter is its capital) or a `GFX_KEY_*`, named by what the key is and not by the text it types; the text comes as its own event. `gfx_inject_event` queues an event as if the window had sent it, which is how a test or a scripted demo drives a game on every backend the same way. The queue holds 256 events and drops the newest when it is full (`GFX_STAT_EVENTS_DROPPED`). The table is in `gfx2d.h`.
 
 The X11 window reports Latin-1 text (it has no input method yet); a page reports any character. `python3 build.py gfx-test` sends the same fixed input to a real window under Xvfb and to a page in headless Chromium, and checks what comes back.
+
+### Text and clipping
+
+The renderer carries DejaVu Sans baked at 14, 20, 28 and 40 pixels (Latin-1; `tools/font_bake.py`, license in `src/native/gfx2d/FONT-LICENSE.txt`). `gfx_font_metrics` and `gfx_font_glyph` give a font's ascent and descent and each glyph's atlas box, size, bearing and advance, and `gfx_font_texture` the atlas to draw it with; the game lays the string out and draws one quad per glyph with `gfx_triangles`, tinted by the vertices' colour. Kerning is not applied. `gfx_clip(x, y, width, height)` limits what is drawn after it to a rectangle in pixels from the top left, until `gfx_clip_reset` or the end of the frame; it costs no draw call.
+
+`src/ui` (namespace `Stride2D.UI`, the start of the in-game UI) has `UIText`: measure, word-wrap and draw text from those fonts, in pixels from the top left. Text is an `int[]` of character codes (`UIText.Load` fills one from a string). It is compiled into a game that mentions `Stride2D.UI`, and it is left out of the plain `dotnet build` of this repo because it needs the renderer's generated bindings. `python3 build.py ui-test` runs it on Mono: it must draw the same picture as the C test and wrap text as an independent Python version does. `gfx_samples/UIText2D` is `UIText` translated by CCSharp and verified against .NET (see above). Translating it taught the subset three rules, now followed in `UIText`: no local that aliases a static array, no `char` (so `Load` takes ASCII and reads it a one-character piece at a time; other Latin-1 goes in by code), and no field initialisers.
 
 Limits: 8192 sprites and 65536 mesh vertices per frame, 64 textures of at most 8192 x 8192 (`GFX_MAX_*`; `GFX_SPRITE_FLOATS` must equal `CoreLimits.SpriteFloats`, which `player_build.py` checks). An oval or circle is anti-aliased; a box is not. Needs for the tests: numpy and Pillow; for the browser tests clang with wasm32-wasi, node, playwright-core and Chromium (WebGPU also xvfb-run and Mesa's lavapipe on a machine with no GPU).
 
@@ -221,6 +228,7 @@ MIT, see [LICENSE.md](LICENSE.md). Built on:
 
 - [Stride](https://github.com/stride3d/stride): where this fork started.
 - [Prowl](https://github.com/crustos/Prowl) (Michael Sakharov): the 2D runtime in `src/core`, `src/physics` and `src/native/box2d` is derived from it.
+- [DejaVu Sans](https://dejavu-fonts.github.io/) (Bitstream Vera license): the baked fonts in `src/native/gfx2d/gfx2d_font_data.c`.
 - [Box2D](https://github.com/crustos/box2d) (Erin Catto): the physics, through the crustos fork.
 - [DTerrain](https://github.com/crustos/DTerrain) (Dominik Zimny): `src/terrain` is ported from it.
 - [Unity-2D-Destruction](https://github.com/crustos/Unity-2D-Destruction) (Matthew Holtzem): `src/destruction` is ported from it.
