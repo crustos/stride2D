@@ -19,7 +19,7 @@ a slider and number box per float, a color button with alpha, a combo box per en
 parameter is refused with the place.
 
 ## Lights
-The Lights window (and the Lights tool of the level editor) put up to 8 point or spot lights in a level, over an ambient color: `lights` and `lighting` in a level's JSON.
+The Lights window (and the Lights tool of the level editor) put up to 64 point or spot lights in a level, over an ambient color (one picture is lit by 8 at a time: the ones nearest the camera whose light reaches it): `lights` and `lighting` in a level's JSON.
 A light has a place in cells (x right, y down from the top edge), a radius in cells, an intensity, a color, and for a spot a direction, cone and edge softness. In the level editor's Lights tool,
 click an empty place to add a light, drag one to move it, right-click one to remove it. The viewport lights its picture with them live (before the level's effects), and they stay
 where they were put when the camera pans or zooms. Moving a light, or a slider, is one undo step.

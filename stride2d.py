@@ -2,6 +2,7 @@
 """stride2d.py -- the Stride2D 2D editor (PyQt5). No .NET: the engine is libstride2d.so (the C# runtime translated to C), called through ctypes.
 
     python3 stride2d.py [project.json]        open the editor (a demo project if none is given)
+    python3 stride2d.py --demo cave           open samples/SlimeCave: a lit cave (Effects and Lights windows show how it is made); tools/cave_gif.py plays it into a GIF
     python3 stride2d.py --demo slime          open samples/SlimeJumpDestruct as a project and play it in the viewport (the dirt wall is dug, crates burst)
     python3 stride2d.py --viewport [...]      also open the engine's window on the first level
     python3 stride2d.py --export-ascii DIR project.json     no GUI: write the project's sprites and levels as ASCII art / emoji text into DIR
@@ -33,6 +34,9 @@ def load_project(path, demo=None):
     if demo == "slime":
         from stride2d_editor.slime_demo import make_slime_project
         return make_slime_project()
+    if demo == "cave":
+        from stride2d_editor.cave_demo import make_cave_project
+        return make_cave_project()
     return make_demo_project()
 
 
@@ -124,6 +128,9 @@ def cmd_gui(project_path, open_viewport, quit_after=None, demo=None):
         from stride2d_editor.slime_demo import SlimeDriver
         main.viewport.driver_factory = SlimeDriver
         main.viewport.autoplay = True
+    if demo == "cave":                           # SlimeCave: the level with its lights and effects, to look at and change (the animation is tools/cave_gif.py)
+        studio.select_level(studio.project.levels[0])
+        studio.select_sprite(next(sp for sp in studio.project.sprites if sp.name == "slime"))
     if open_viewport or demo == "slime":
         QtCore.QTimer.singleShot(200, main.viewport.open)
     if quit_after:
@@ -134,7 +141,7 @@ def cmd_gui(project_path, open_viewport, quit_after=None, demo=None):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("project", nargs="?", help="a project .json (default: the demo project)")
-    ap.add_argument("--demo", choices=["coins", "slime"], help="open a built-in project: 'slime' is samples/SlimeJumpDestruct, played in the viewport")
+    ap.add_argument("--demo", choices=["coins", "slime", "cave"], help="open a built-in project: 'slime' is samples/SlimeJumpDestruct, played in the viewport; 'cave' is samples/SlimeCave, a dark cave with lights and effects")
     ap.add_argument("--viewport", action="store_true", help="also open the engine's window")
     ap.add_argument("--export-ascii", metavar="DIR", help="no GUI: write sprites/ and levels/ text files of the project into DIR")
     ap.add_argument("--import-ascii", metavar="OUT.json", help="no GUI: build a project from --sprites and --levels text files")
