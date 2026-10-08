@@ -28,3 +28,10 @@ Copyright (c) 2023 Michael Sakharov (Prowl Game Engine, from which src/core, src
 Box2D: Copyright (c) Erin Catto, MIT.
 Unity-2D-Destruction: Copyright (c) 2016 Matthew Holtzem (src/destruction is ported from it).
 DTerrain: Copyright (c) 2020 Dominik Zimny (src/terrain is ported from it).
+
+
+---
+
+Third-party code: the effects in src/native/gfx2d/fx that are ported from OpenToonz (blend, HSV / HLS adjust, levels and the gradients) are covered by the
+BSD 3-Clause license of OpenToonz, reproduced in src/native/gfx2d/fx/OPENTOONZ-LICENSE.txt. The names of OpenToonz, DWANGO and the contributors are not used
+to endorse or promote Stride2D.
