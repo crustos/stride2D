@@ -15,6 +15,9 @@
 
 #include "gfx2d_internal.h"
 
+#define GFX_FX_WANT_GLSL // the effects' shaders (generated from fx/*.fx)
+#include "gfx2d_fx_gen.h"
+
 #if defined( __has_include ) && !defined( GFX_NO_X11 ) // -DGFX_NO_X11 builds without a window even where the headers are there
 #if __has_include( <X11/Xlib.h> ) && __has_include( <X11/Xutil.h> )
 #define GFX_HAVE_X11_HEADERS 1
@@ -99,6 +102,8 @@ typedef ptrdiff_t GLsizeiptr, GLintptr;
 	X( GLint, glGetUniformLocation, ( GLuint, const GLchar* ) )                                                                                               \
 	X( void, glUniform4f, ( GLint, GLfloat, GLfloat, GLfloat, GLfloat ) )                                                                                     \
 	X( void, glUniform1i, ( GLint, GLint ) )                                                                                                                  \
+	X( void, glUniform4fv, ( GLint, GLsizei, const GLfloat* ) ) \
+	X( void, glCopyTexSubImage2D, ( GLenum, GLint, GLint, GLint, GLint, GLint, GLsizei, GLsizei ) ) \
 	X( void, glGenBuffers, ( GLsizei, GLuint* ) )                                                                                                             \
 	X( void, glDeleteBuffers, ( GLsizei, const GLuint* ) )                                                                                                    \
 	X( void, glBindBuffer, ( GLenum, GLuint ) )                                                                                                               \
@@ -206,6 +211,11 @@ static GLuint g_fbo, g_rbo;
 static GLuint g_sprite_prog, g_mesh_prog;
 static GLint g_sprite_view, g_mesh_view, g_mesh_tex;
 static GLuint g_sprite_vao, g_mesh_vao, g_inst_buf, g_vert_buf;
+
+// The effects: one program each (GFX_FX_VS draws one big triangle; the fragment shader reads the picture as it was from g_fx_scratch with texelFetch), and
+// the scratch texture an effect finds the picture in. An effect copies the picture into it, then draws over the picture (inside the scissor, if a clip is in force).
+static GLuint g_fx_prog[GFX_FX_ID_MAX + 1], g_fx_scratch;
+static GLint g_fx_u_src[GFX_FX_ID_MAX + 1], g_fx_u_p[GFX_FX_ID_MAX + 1], g_fx_u_size[GFX_FX_ID_MAX + 1];
 
 typedef struct GlTex
 {
@@ -712,12 +722,19 @@ static void teardown( void )
 			glDeleteProgram( g_sprite_prog );
 		if ( g_mesh_prog )
 			glDeleteProgram( g_mesh_prog );
+		for ( i = 0; i <= GFX_FX_ID_MAX; i++ )
+			if ( g_fx_prog[i] )
+				glDeleteProgram( g_fx_prog[i] );
+		if ( g_fx_scratch )
+			glDeleteTextures( 1, &g_fx_scratch );
 		if ( g_fbo )
 			glDeleteFramebuffers( 1, &g_fbo );
 		if ( g_rbo )
 			glDeleteRenderbuffers( 1, &g_rbo );
 	}
 	memset( g_tex, 0, sizeof g_tex );
+	memset( g_fx_prog, 0, sizeof g_fx_prog );
+	g_fx_scratch = 0;
 	g_sprite_vao = g_mesh_vao = g_inst_buf = g_vert_buf = g_sprite_prog = g_mesh_prog = g_fbo = g_rbo = 0;
 	if ( g_dpy != NULL )
 	{
@@ -874,6 +891,29 @@ static int gl_init( int width, int height )
 	g_mesh_view = glGetUniformLocation( g_mesh_prog, "u_view" );
 	g_mesh_tex = glGetUniformLocation( g_mesh_prog, "u_tex" );
 
+	glGenTextures( 1, &g_fx_scratch );
+	glActiveTexture( GL_TEXTURE0 );
+	glBindTexture( GL_TEXTURE_2D, g_fx_scratch );
+	glTexImage2D( GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL );
+	glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST );
+	glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST );
+	glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE );
+	glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE );
+	for ( i = 1; i <= GFX_FX_ID_MAX; i++ ) // an effect whose shader does not build is left out (STRIDE2D_GFX_DEBUG=1 says why): the others still work
+	{
+		if ( gfx_fx_glsl[i] == NULL )
+			continue;
+		g_fx_prog[i] = link_program( GFX_FX_VS, gfx_fx_glsl[i] );
+		if ( !g_fx_prog[i] )
+		{
+			why( "an effect's shader did not build" );
+			continue;
+		}
+		g_fx_u_src[i] = glGetUniformLocation( g_fx_prog[i], "u_src" );
+		g_fx_u_p[i] = glGetUniformLocation( g_fx_prog[i], "u_p" );
+		g_fx_u_size[i] = glGetUniformLocation( g_fx_prog[i], "u_size" );
+	}
+
 	glGenBuffers( 1, &g_inst_buf );
 	glBindBuffer( GL_ARRAY_BUFFER, g_inst_buf );
 	glBufferData( GL_ARRAY_BUFFER, (GLsizeiptr)GFX_MAX_SPRITES * GFX_INSTANCE_BYTES, NULL, GL_DYNAMIC_DRAW );
@@ -980,6 +1020,23 @@ static void gl_frame( const GfxFrame* f )
 			int x0 = cmd->first & 0xffff, y0 = ( cmd->first >> 16 ) & 0xffff, x1 = cmd->count & 0xffff, y1 = ( cmd->count >> 16 ) & 0xffff;
 			glEnable( GL_SCISSOR_TEST );
 			glScissor( x0, f->height - y1, x1 - x0, y1 - y0 ); // GL counts rows from the bottom
+		}
+		else if ( cmd->kind == GFXCMD_EFFECT )
+		{
+			int id = cmd->first;
+			if ( id < 1 || id > GFX_FX_ID_MAX || !g_fx_prog[id] || cmd->count < 0 || cmd->count >= f->nfx )
+				continue;
+			glActiveTexture( GL_TEXTURE0 ); // the picture so far, copied (the scissor does not limit a copy), then drawn over without blending
+			glBindTexture( GL_TEXTURE_2D, g_fx_scratch );
+			glCopyTexSubImage2D( GL_TEXTURE_2D, 0, 0, 0, 0, 0, f->width, f->height );
+			glDisable( GL_BLEND );
+			glUseProgram( g_fx_prog[id] );
+			glUniform1i( g_fx_u_src[id], 0 );
+			glUniform4fv( g_fx_u_p[id], GFX_FX_PARAMS / 4, &f->fx[cmd->count * GFX_FX_PARAMS] );
+			glUniform4f( g_fx_u_size[id], (float)f->width, (float)f->height, 0.f, 0.f );
+			glBindVertexArray( 0 );
+			glDrawArrays( GL_TRIANGLES, 0, 3 );
+			glEnable( GL_BLEND );
 		}
 		else if ( cmd->kind == GFXCMD_SPRITES )
 		{

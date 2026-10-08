@@ -8,7 +8,8 @@
 //     void gfx_web_texture_update(int id, int x, int y, int w, int h, const void* image)      `image` is the whole image; the script knows its width
 //     void gfx_web_texture_free(int id)
 //     void gfx_web_frame(const void* cmds, int ncmds, const void* inst, int ninst, const void* verts, int nverts,
-//                        float left, float bottom, float right, float top, float bg_r, float bg_g, float bg_b)
+//                        float left, float bottom, float right, float top, float bg_r, float bg_g, float bg_b, const void* fx, int nfx)
+//                                           `fx` is nfx slots of GFX_FX_PARAMS floats: the parameters of the frame's effects (GFXCMD_EFFECT says which slot)
 //     int  gfx_web_poll(int* out5)          the oldest input event the page has received, as the five ints of gfx_poll_event; 0 if there is none
 //     void gfx_web_read(void* rgba)         the canvas as just drawn, RGBA, rows bottom to top. WebGPU cannot be read at once: it gives the newest
 //                                           picture that has come back from the GPU, a frame or more behind (black until the first)
@@ -28,7 +29,7 @@ WEB_IMPORT( gfx_web_texture_update ) void gfx_web_texture_update( int id, int x,
 WEB_IMPORT( gfx_web_texture_free ) void gfx_web_texture_free( int id );
 WEB_IMPORT( gfx_web_frame )
 void gfx_web_frame( const void* cmds, int ncmds, const void* inst, int ninst, const void* verts, int nverts, float l, float b, float r, float t, float cr,
-					float cg, float cb );
+					float cg, float cb, const void* fx, int nfx );
 WEB_IMPORT( gfx_web_read ) void gfx_web_read( void* rgba );
 WEB_IMPORT( gfx_web_poll ) int gfx_web_poll( int* out5 );
 
@@ -68,7 +69,7 @@ static void web_texture_free( int id )
 
 static void web_frame( const GfxFrame* f )
 {
-	gfx_web_frame( f->cmds, f->ncmds, f->inst, f->ninst, f->verts, f->nverts, f->left, f->bottom, f->right, f->top, f->bg_r, f->bg_g, f->bg_b );
+	gfx_web_frame( f->cmds, f->ncmds, f->inst, f->ninst, f->verts, f->nverts, f->left, f->bottom, f->right, f->top, f->bg_r, f->bg_g, f->bg_b, f->fx, f->nfx );
 }
 
 static int web_present( void )

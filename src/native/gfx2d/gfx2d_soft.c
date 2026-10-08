@@ -20,6 +20,7 @@ typedef struct SoftTex
 
 static SoftTex g_tex[GFX_MAX_TEXTURES];
 static uint8_t* g_fb; // rows bottom to top, RGBA
+static uint8_t* g_scratch; // the picture as an effect found it (an effect reads this and writes g_fb)
 static int g_w, g_h;
 static int g_cx0, g_cx1, g_cy0, g_cy1; // the clip: columns cx0 .. cx1 and rows (from the BOTTOM) cy0 .. cy1, inclusive; empty if cx1 < cx0 or cy1 < cy0
 
@@ -42,10 +43,53 @@ static float cos_det( float x )
 	return (float)cos( (double)x );
 }
 
+// pow, exp, log have the same last-bit problem as sin and cos: computed in double, then rounded once
+static float pow_det( float x, float y )
+{
+	return (float)pow( (double)x, (double)y );
+}
+
+static float atan2_det( float y, float x )
+{
+	return (float)atan2( (double)y, (double)x );
+}
+
+// the gradient curves (0 ease in-out, 1 linear, 2 ease in, 3 ease out), and a premultiplied colour pm, with alpha a, put over the picture colour c (opacity op)
+static float fxc_curve( int ty, float t )
+{
+	if ( ty == 1 )
+		return t;
+	if ( ty == 2 )
+		return t * t;
+	if ( ty == 3 )
+		return 1.f - ( 1.f - t ) * ( 1.f - t );
+	return ( -2.f * t + 3.f ) * ( t * t );
+}
+
+static void fxc_over_pm( float* c, const float* pm, float a, float op )
+{
+	int i;
+	for ( i = 0; i < 3; i++ )
+		c[i] = pm[i] * op + c[i] * ( 1.f - a * op );
+}
+
+static void fxc_over( float* c, const float* c1, const float* c2, float f, float op )
+{
+	float pm[3];
+	int i;
+	for ( i = 0; i < 3; i++ )
+		pm[i] = c1[i] * c1[3] * ( 1.f - f ) + c2[i] * c2[3] * f;
+	fxc_over_pm( c, pm, c1[3] * ( 1.f - f ) + c2[3] * f, op );
+}
+
 static uint8_t to_u8( float v ) // v in 0..1
 {
 	return (uint8_t)( clamp01( v ) * 255.f + 0.5f );
 }
+
+// the effects (fx/*.fx): their CPU reference bodies are generated into this file, after the helpers above (a body may use sin_det, cos_det, pow_det, atan2_det, fxc_curve, fxc_over_pm, fxc_over, clamp01, to_u8)
+#define GFX_FX_WANT_SOFT
+#include "gfx2d_fx_gen.h"
 
 // dst = src * a + dst * (1 - a), on straight colours in 0..1; the picture's alpha stays 255
 static void blend( uint8_t* dst, float r, float g, float b, float a )
@@ -241,13 +285,52 @@ static void draw_triangle( const GfxFrame* f, const GfxVertex* a, const GfxVerte
 	}
 }
 
+// ---- effects ------------------------------------------------------------------------------------------------------------------------
+
+// One effect over the clip: every pixel in it is read from the picture as it was when the effect began (g_scratch), made into 0..1 floats, handed to the effect's
+// reference function with its place over the picture (u from the left, v from the TOP, at the pixel's centre), and stored back rounded and clamped.
+static void apply_effect( const GfxFrame* f, const GfxCmd* cmd )
+{
+	GfxFxSoftFn fn;
+	const float* p;
+	int x, y;
+	if ( cmd->first < 1 || cmd->first > GFX_FX_ID_MAX || cmd->count < 0 || cmd->count >= f->nfx )
+		return;
+	fn = gfx_fx_soft[cmd->first];
+	if ( fn == NULL || g_cx1 < g_cx0 || g_cy1 < g_cy0 )
+		return;
+	p = &f->fx[cmd->count * GFX_FX_PARAMS];
+	memcpy( g_scratch, g_fb, (size_t)g_w * (size_t)g_h * 4 );
+	for ( y = g_cy0; y <= g_cy1; y++ ) // rows from the bottom
+	{
+		float v = 1.f - ( (float)y + 0.5f ) / (float)g_h;
+		for ( x = g_cx0; x <= g_cx1; x++ )
+		{
+			size_t at = ( (size_t)y * (size_t)g_w + (size_t)x ) * 4;
+			float c[4];
+			int k;
+			for ( k = 0; k < 4; k++ )
+				c[k] = g_scratch[at + k] * ( 1.f / 255.f );
+			fn( p, c, ( (float)x + 0.5f ) / (float)g_w, v, (float)x + 0.5f, v * (float)g_h, (float)g_w, (float)g_h );
+			for ( k = 0; k < 4; k++ )
+				g_fb[at + k] = to_u8( c[k] );
+		}
+	}
+}
+
 // ---- the backend --------------------------------------------------------------------------------------------------------------------
 
 static int soft_init( int width, int height )
 {
 	g_fb = (uint8_t*)calloc( (size_t)width * (size_t)height, 4 );
-	if ( g_fb == NULL )
+	g_scratch = (uint8_t*)calloc( (size_t)width * (size_t)height, 4 );
+	if ( g_fb == NULL || g_scratch == NULL )
+	{
+		free( g_fb );
+		free( g_scratch );
+		g_fb = g_scratch = NULL;
 		return 0;
+	}
 	g_w = width;
 	g_h = height;
 	memset( g_tex, 0, sizeof g_tex );
@@ -261,7 +344,8 @@ static void soft_shutdown( void )
 		free( g_tex[i].rgba );
 	memset( g_tex, 0, sizeof g_tex );
 	free( g_fb );
-	g_fb = NULL;
+	free( g_scratch );
+	g_fb = g_scratch = NULL;
 }
 
 static int soft_windowed( void )
@@ -331,6 +415,8 @@ static void soft_frame( const GfxFrame* f )
 			g_cy0 = f->height - ( ( cmd->count >> 16 ) & 0xffff ); // the rows are counted from the bottom here
 			g_cy1 = f->height - 1 - ( ( cmd->first >> 16 ) & 0xffff );
 		}
+		else if ( cmd->kind == GFXCMD_EFFECT )
+			apply_effect( f, cmd );
 		else if ( cmd->kind == GFXCMD_SPRITES )
 		{
 			for ( k = 0; k < cmd->count; k++ )

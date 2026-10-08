@@ -10,6 +10,9 @@
 #include "gfx2d_font.h"
 #include "gfx2d_internal.h"
 
+#define GFX_FX_WANT_INFO // the effects' names and defaults (generated from fx/*.fx)
+#include "gfx2d_fx_gen.h"
+
 // ---- state --------------------------------------------------------------------------------------------------------------------------
 
 static int g_events[GFX_MAX_EVENTS][5];
@@ -32,6 +35,8 @@ static GfxVertex g_verts[GFX_MAX_VERTICES];
 static int g_nverts;
 static GfxCmd g_cmds[GFX_MAX_CMDS];
 static int g_ncmds;
+static float g_fx[GFX_MAX_EFFECTS * GFX_FX_PARAMS]; // the frame's effects: GFX_FX_PARAMS floats each, complete
+static int g_nfx;
 static int g_clip[4]; // x0, y0, x1, y1: the clip the commands so far have left in force
 
 typedef struct TexInfo
@@ -71,7 +76,7 @@ static void open_frame( void )
 	if ( g_open )
 		return;
 	g_open = 1;
-	g_ninst = g_nverts = g_ncmds = 0;
+	g_ninst = g_nverts = g_ncmds = g_nfx = 0;
 	g_clip[0] = g_clip[1] = 0;
 	g_clip[2] = g_w;
 	g_clip[3] = g_h;
@@ -139,7 +144,7 @@ int gfx_init( int width, int height )
 		g_be->texture_create( 0, 1, 1, GFX_FILTER_NEAREST, white );
 	}
 	g_open = g_have_frame = g_stale = 0;
-	g_ninst = g_nverts = g_ncmds = 0;
+	g_ninst = g_nverts = g_ncmds = g_nfx = 0;
 	g_running = 1;
 	g_ev_head = g_ev_count = g_ev_dropped = 0;
 	g_st_calls = g_st_sprites = g_st_vertices = g_st_bytes = g_st_frames = 0;
@@ -356,6 +361,35 @@ int gfx_clip_reset( void )
 	return gfx_clip( 0, 0, g_w, g_h );
 }
 
+int gfx_effect( int effect, const float* params, int count )
+{
+	GfxCmd* cmd;
+	float* slot;
+	int i, given;
+	if ( !g_ready )
+		return 0;
+	open_frame();
+	if ( effect < 1 || effect > GFX_FX_ID_MAX || gfx_fx_info[effect].name == NULL )
+		return 0;
+	if ( g_nfx >= GFX_MAX_EFFECTS || g_ncmds >= GFX_MAX_CMDS )
+		return 0;
+	slot = &g_fx[g_nfx * GFX_FX_PARAMS];
+	given = params == NULL || count < 0 ? 0 : ( count > GFX_FX_PARAMS ? GFX_FX_PARAMS : count );
+	for ( i = 0; i < GFX_FX_PARAMS; i++ )
+	{
+		float v = i < given ? params[i] : gfx_fx_info[effect].defaults[i];
+		if ( !( v >= -1e30f && v <= 1e30f ) ) // not a number, or beyond any use: the default (every backend then sees only finite values)
+			v = gfx_fx_info[effect].defaults[i];
+		slot[i] = v;
+	}
+	cmd = &g_cmds[g_ncmds++];
+	cmd->kind = GFXCMD_EFFECT;
+	cmd->first = effect;
+	cmd->count = g_nfx++;
+	cmd->texture = 0;
+	return 1;
+}
+
 int gfx_end( void )
 {
 	GfxFrame f;
@@ -381,6 +415,8 @@ int gfx_end( void )
 	f.ninst = g_ninst;
 	f.verts = g_verts;
 	f.nverts = g_nverts;
+	f.fx = g_fx;
+	f.nfx = g_nfx;
 	g_be->frame( &f );
 	g_running = g_be->present();
 

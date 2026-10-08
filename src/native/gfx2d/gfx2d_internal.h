@@ -31,6 +31,7 @@ typedef struct GfxVertex
 #define GFXCMD_TRIANGLES 2 // draw vertices [first, first + count) with `texture`
 #define GFXCMD_CLIP 3      // later draws only change pixels in a rectangle, in pixels from the TOP left, end exclusive: first = x0 | y0 << 16, count = x1 | y1 << 16
                            // (0 <= x0 <= x1 <= width, likewise y); the whole picture is the state at the start of every frame
+#define GFXCMD_EFFECT 4    // an effect pass over the picture so far, inside the clip in force: first = the effect's id (GFX_FX_*), count = its slot in GfxFrame.fx
 
 typedef struct GfxCmd
 {
@@ -52,6 +53,8 @@ typedef struct GfxFrame
 	int ninst;
 	const GfxVertex* verts;
 	int nverts;
+	const float* fx; // nfx slots of GFX_FX_PARAMS floats: the parameters of the frame's effects, already complete (the core has filled in the defaults)
+	int nfx;
 } GfxFrame;
 
 // A backend. Every picture is width x height, RGBA8, and `read` gives it with its rows BOTTOM TO TOP (what glReadPixels gives); alpha is 255 everywhere.
