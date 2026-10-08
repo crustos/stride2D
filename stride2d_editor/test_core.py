@@ -429,6 +429,20 @@ class LevelLights(unittest.TestCase):
         lv.lights[1]["enabled"] = False
         return lv
 
+    def test_more_lights_than_the_effect_takes_are_chosen_by_the_camera(self):
+        from .model import Level
+        from . import lights as L
+        lv = Level("cave", 100, 20)
+        lv.lights = [L.new_light("point", x + 0.5, 10.5) for x in range(0, 100, 5)]      # 20 lights, 5 cells apart, radius 4
+        near = L.effect_values(lv, 50.0, 9.5, 4.0, 2.0)                                  # a view 16 cells wide at x 50
+        xs = sorted(round(near["l%dx" % i] * 16 + 50 - 8, 1) for i in range(L.MAX_SHADER_LIGHTS) if near.get("l%dk" % i, 0) > 0)
+        self.assertEqual(xs, [40.5, 45.5, 50.5, 55.5, 60.5])                             # only the lights that reach the picture are given, the rest are off
+        far = L.effect_values(lv, 20.0, 9.5, 4.0, 2.0)
+        self.assertEqual(sorted(round(far["l%dx" % i] * 16 + 20 - 8, 1) for i in range(L.MAX_SHADER_LIGHTS) if far.get("l%dk" % i, 0) > 0), [10.5, 15.5, 20.5, 25.5, 30.5])
+        lv.lights = [L.new_light("point", 50.5, 10.5) for _ in range(12)]                # all in view: eight are used
+        self.assertEqual(sum(1 for i in range(8) if L.effect_values(lv, 50.0, 9.5, 4.0, 2.0).get("l%dk" % i, 0) > 0), 8)
+        self.assertEqual(L.MAX_LIGHTS, 64)
+
     def test_lights_and_lighting_round_trip_and_a_plain_level_writes_neither(self):
         from .model import Level, Project
         p = Project("p")
@@ -499,3 +513,59 @@ class LevelLights(unittest.TestCase):
         vp._apply_effects(lv)
         self.assertEqual(calls, ["scene_lights", "tint"])
 
+
+
+class CaveDemo(unittest.TestCase):
+    """samples/SlimeCave: the project, and the stand-in bot that plays it (no renderer, no engine)."""
+
+    def test_project_is_valid_lit_and_dressed(self):
+        from .cave_demo import make_cave_project
+        from .fx import pack
+        from .model import Project
+        from . import lights as L
+        p = make_cave_project()
+        lv = p.levels[0]
+        self.assertEqual((lv.width, lv.height), (100, 18))
+        self.assertGreater(len(lv.lights), L.MAX_SHADER_LIGHTS)                         # more than one picture takes: the camera picks
+        self.assertLessEqual(len(lv.lights), L.MAX_LIGHTS)
+        for fx in lv.effects:
+            pack(fx["effect"], fx["values"])                                            # every effect and value is one the registry accepts
+        back = Project.from_json(json.loads(json.dumps(p.to_json())))
+        self.assertEqual(back.levels[0].cells, lv.cells)
+        self.assertEqual(back.levels[0].lights, lv.lights)
+        self.assertEqual(back.levels[0].effects, lv.effects)
+        for e in {c for c in lv.cells if c}:
+            self.assertIn(e, p.tiles)                                                   # every emoji in the level is a tile, and every tile has its sprite
+        for t in p.tiles.values():
+            self.assertTrue(any(s.name == t.sprite for s in p.sprites), t.name)
+
+    def test_the_bot_digs_through_the_cave_in_shoots_and_reaches_the_flag(self):
+        from .cave_demo import CaveSim, cave_frame_effects, cave_frame_lights, make_cave_project
+        from .fx import pack
+        from . import lights as L
+        p = make_cave_project()
+        lv = p.levels[0]
+        before = list(lv.cells)
+        sim = CaveSim(p, lv)
+        seen = 0
+        for i in range(60 * 30):
+            sim.step(1 / 60.0)
+            if i % 30 == 0:
+                vals = L.effect_values(cave_frame_lights(sim), sim.cx, sim.cy, sim.half, 16 / 9.0)
+                self.assertIsNotNone(vals)
+                seen = max(seen, sum(1 for k in range(8) if vals.get("l%dk" % k, 0) > 0))
+                for fx in cave_frame_effects(sim):
+                    pack(fx["effect"], fx["values"])
+            if sim.done and sim.done_t > 0.5:
+                break
+        self.assertTrue(sim.done, sim.log)
+        self.assertLess(sim.t, 25.0)
+        self.assertEqual(lv.cells, before)                                              # playing never changes the project
+        self.assertTrue(any(l.startswith("crater") for l in sim.log))                   # the dirt was dug...
+        self.assertTrue(any("burst" in l for l in sim.log))                             # ...and something shot
+        self.assertGreaterEqual(sim.gems_taken, 8)
+        self.assertEqual(seen, 8)                                                       # the lights of a frame fill the effect's eight places
+        again = CaveSim(p, lv)                                                          # and it is deterministic
+        for _ in range(int(sim.t * 60)):
+            again.step(1 / 60.0)
+        self.assertEqual((again.x, again.y, again.gems_taken), (sim.x, sim.y, sim.gems_taken))

@@ -1,9 +1,11 @@
 """Lights in a level. A light has a place in the level (in cells: x to the right, y down from the top edge, so a light at (3.5, 2.5) is over the middle of the tile in
 column 3, row 2), a radius in cells, and the rest. The viewport turns them, every frame, into one `scene_lights` effect (src/native/gfx2d/fx/scene_lights.fx) whose positions are
-fractions of the window for the camera it has just then, so a light stays where it was put while the camera pans and zooms. At most MAX_LIGHTS are used."""
+fractions of the window for the camera it has just then, so a light stays where it was put while the camera pans and zooms. A level holds up to MAX_LIGHTS lights; the effect
+takes MAX_SHADER_LIGHTS, so each frame it gets the ones that matter to the camera (those whose light reaches the picture, the nearest to its middle first)."""
 import math
 
-MAX_LIGHTS = 8
+MAX_LIGHTS = 64             # lights in a level
+MAX_SHADER_LIGHTS = 8       # lights in one picture: scene_lights.fx
 KINDS = ("point", "spot")
 FALLOFFS = ("Linear", "Smooth", "Quadratic")
 
@@ -70,9 +72,20 @@ def effect_values(level, cx, cy, half, aspect):
     """The values of the `scene_lights` effect for `level` seen by a camera centered on (cx, cy) world units, `half` units up and down, `aspect` wide per high; None if
     nothing is lit (lighting switched off, or no light is on). World units are cells, y up: the level's top edge is at y = level.height."""
     lg = level.lighting
-    lights = [l for l in level.lights if l["enabled"]][:MAX_LIGHTS]
+    lights = [l for l in level.lights if l["enabled"]]
     if not lg["enabled"] or not lights or half <= 0:
         return None
+    if len(lights) > MAX_SHADER_LIGHTS:
+        hw = half * aspect
+        vy = level.height - cy                                  # the camera's middle in the level's own coordinates (y down from the top)
+
+        def reach(l):                                           # how far the light is from the picture, minus its radius: negative if it reaches in
+            dx = max(abs(l["x"] - cx) - hw, 0.0)
+            dy = max(abs(l["y"] - vy) - half, 0.0)
+            return math.hypot(dx, dy) - l["radius"]
+        near = [l for l in lights if reach(l) < 0 and l["intensity"] > 0] or lights
+        lights = sorted(near, key=lambda l: (l["x"] - cx) ** 2 + (l["y"] - vy) ** 2)
+    lights = lights[:MAX_SHADER_LIGHTS]
     v = {"ambient": list(lg["ambient"]), "falloff": lg["falloff"], "glow": lg["glow"], "exposure": lg["exposure"], "mixAmt": 1.0}
     for i, l in enumerate(lights):
         v["l%dx" % i] = (l["x"] - cx) / (2.0 * half * aspect) + 0.5
