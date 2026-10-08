@@ -47,4 +47,16 @@ Emoji names come from Unicode (🧱 → "brick") and link to the sprite with the
 
 Tiles can be `solid` (static collider), `dynamic` (a movable body, like a crate) and `diggable` (a blast removes it, like dirt); the emoji legend writes them as `# 📦 = crate (dynamic) -> crate`. In the viewport's play mode a click drops a ball and B blasts at the pointer.
 
-Not yet: Unity scene import, generating the player's C#/C from the GUI, WASM window.
+## Unity import (2D)
+File > Import > *Unity project: sprites and scenes as levels...* (or `python3 stride2d.py --import-unity OUT.json --unity DIR`; `--no-scenes` for sprites only, `--cell N` to choose the grid) reads a Unity project folder
+(its text-serialized `.unity` scenes, `.prefab` files and PNG textures with their `.meta` files) and adds sprites and levels to the project. *Unity 2D sprites...* and *Unity PNG textures...* import the pictures alone.
+
+- **Sprites**: every PNG that is a sprite in Unity. A Multiple-mode sheet is cut into its slices (a `walk_0`, `walk_1` series of one size becomes the frames of one sprite `walk`; slices Unity named after their own texture, such as a tileset's `tiles_0`, `tiles_1`, stay separate).
+  Colours join the palette (the nearest are merged past 256); a texture over 256 px is scaled down.
+- **Levels**: one per scene. Each enabled sprite is placed by its world position (parents and prefab instances applied), on a grid of the Grid's cell size (else the most common sprite size), the highest sorting order winning a shared cell.
+  Tilemap tiles are placed the same way. A tile is `solid` with a 2D collider (or a TilemapCollider2D) that is not a trigger, and `dynamic` with a dynamic Rigidbody2D as well.
+- **Prefabs**: instances are unpacked from their `.prefab` files, with overrides of position, scale, active, sprite, sorting order, enabled, trigger and body type, nested prefabs and variants.
+- **Said, not hidden**: what is left out (rotation, flipped tiles, hexagonal grids, objects off the grid or not cell-sized, sprites or prefabs that were not found, later frames of an animation) is listed in a dialog after the import.
+- Lights and effects are not imported (a level made this way starts with Stride2D's defaults); add them in the Lights and Effects windows.
+
+Not yet: generating the player's C#/C from the GUI, WASM window.
