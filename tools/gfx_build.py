@@ -9,9 +9,15 @@ The desktop OpenGL backend loads EGL/GLES/X11 with dlopen, so nothing but libdl 
 """
 import argparse, os, shutil, subprocess, sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import gfx_fx_gen
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SRC = os.path.join(ROOT, "src", "native", "gfx2d")
 CORE = ["gfx2d_core.c", "gfx2d_soft.c", "gfx2d_font.c", "gfx2d_font_data.c"]
+# the test programs (name: the C files they are built from, the driver first); each is linked with the static library
+TESTS = {"input_test": ["input_test.c"], "input_driver": ["input_driver.c"], "font_test": ["font_test.c", "font_scene.c"],
+         "clip_test": ["font_test.c", "clip_scene.c"], "fx_test": ["fx_test.c", "fx_scene.c"], "fx2_test": ["fx_test.c", "fx2_scene.c"], "fx3_test": ["fx_test.c", "fx3_scene.c"], "fx4_test": ["fx_test.c", "fx4_scene.c"]}
 FLAGS = ["-O2", "-g", "-ffp-contract=off", "-Wall", "-Wno-unused-function", "-fvisibility=default"]
 
 
@@ -39,6 +45,10 @@ def build(out=None, cc=None, gl=True, x11=True, force=False, quiet=False):
     """Returns a dict with the paths of what was built: static, shared, driver."""
     cc = cc or os.environ.get("CC") or "cc"
     if not shutil.which(cc): raise SystemExit("gfx_build: `%s` not found" % cc)
+    try:
+        gfx_fx_gen.generate()   # the effects (fx/*.fx) -> the code the backends compile; only a file whose text changes is written
+    except gfx_fx_gen.FxError as e:
+        raise SystemExit("gfx_build: %s" % e)
     out = os.path.abspath(out or os.path.join(ROOT, "build", "gfx"))
     os.makedirs(out, exist_ok=True)
     srcs, hdrs, defs = sources(gl), headers(), defines(gl, x11)
@@ -62,9 +72,9 @@ def build(out=None, cc=None, gl=True, x11=True, force=False, quiet=False):
     tsrc = [os.path.join(test, "driver.c"), os.path.join(test, "scene.c")]
     if force or newer(res["driver"], tsrc + [res["static"]] + hdrs):
         sh([cc, "-std=gnu99", "-O2", "-ffp-contract=off", "-o", res["driver"]] + tsrc + [res["static"], "-ldl", "-lm"])
-    for name in ("input_test", "input_driver", "font_test", "clip_test"):
+    for name, files in TESTS.items():
         exe = os.path.join(out, "gfx_" + name)
-        tc = [os.path.join(test, "font_test.c" if name == "clip_test" else name + ".c")] + ([os.path.join(test, name[:4] + "_scene.c")] if name in ("font_test", "clip_test") else [])
+        tc = [os.path.join(test, f) for f in files]
         if force or newer(exe, tc + [res["static"]] + hdrs):
             sh([cc, "-std=gnu99", "-O2", "-ffp-contract=off", "-o", exe] + tc + [res["static"], "-ldl", "-lm"])
         res[name] = exe
