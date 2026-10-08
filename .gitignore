@@ -57,7 +57,7 @@ Cache/
 /doc/stride_doc_output/
 /build/Stride.version
 /build/Stride.*VC.db
-/tools
+
 /externals/
 /sources/common/externals/
 /sources/tools/Stride.ShaderKeyGenerator/build/
@@ -70,7 +70,7 @@ Cache/
 /sources/games/GDC2013/build/*
 /gdc/demo_dragon/
 /package/
-/tools/
+
 **/Properties/launchSettings.json
 !**/*Tests*/Properties/launchSettings.json
 !sources/editor/Stride.GameStudio/Properties/launchSettings.json
