@@ -1,5 +1,7 @@
 # Stride2D
 
+![editor.gif](editor.gif)
+
 A small 2D game engine whose games are written in C# and ship as **one native executable with no .NET in it**.
 
 The engine and the game are written in a restricted subset of C#. A translator ([CCSharp](https://github.com/crustos/CCSharp)) turns them into a single C file, and an ordinary C compiler builds that. The same source also runs on .NET, which is the reference: every test and sample is built both ways and must print exactly the same thing.
