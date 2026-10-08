@@ -484,7 +484,7 @@ static unsigned long x_window( int width, int height, EGLDisplay* dpy_out, EGLCo
 	XSetWindowAttributes attrs;
 	XVisualInfo tmpl, *vi = NULL;
 	Visual* visual;
-	int depth, nvi = 0, screen;
+	int depth, nvi = 0, screen, wx = 0, wy = 0;
 	XSizeHints* hints;
 
 	if ( getenv( "DISPLAY" ) == NULL || getenv( "STRIDE2D_HEADLESS" ) != NULL || !x_load() )
@@ -525,7 +525,13 @@ static unsigned long x_window( int width, int height, EGLDisplay* dpy_out, EGLCo
 	attrs.colormap = g_xcmap;
 	attrs.border_pixel = 0;
 	attrs.event_mask = StructureNotifyMask | KeyPressMask | KeyReleaseMask | ButtonPressMask | ButtonReleaseMask | PointerMotionMask | FocusChangeMask;
-	g_xwin = xl.f_CreateWindow( g_xdpy, xl.f_RootWindow( g_xdpy, screen ), 0, 0, (unsigned)width, (unsigned)height, 0, depth, InputOutput, visual,
+	{
+		// STRIDE2D_WINDOW_POS="x,y": where the window opens (the editor tiles its own windows around it); default the top left
+		const char* pos = getenv( "STRIDE2D_WINDOW_POS" );
+		if ( pos == NULL || sscanf( pos, "%d,%d", &wx, &wy ) != 2 )
+			wx = wy = 0;
+	}
+	g_xwin = xl.f_CreateWindow( g_xdpy, xl.f_RootWindow( g_xdpy, screen ), wx, wy, (unsigned)width, (unsigned)height, 0, depth, InputOutput, visual,
 							 CWColormap | CWBorderPixel | CWEventMask, &attrs );
 	if ( vi != NULL )
 		xl.f_Free( vi );
