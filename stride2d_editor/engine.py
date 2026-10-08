@@ -57,7 +57,7 @@ GFX = {
     "gfx_begin": (None, []), "gfx_sprites": (_i, [_v, _i]), "gfx_end": (_i, []), "gfx_backend": (_i, []), "gfx_camera": (None, [_f] * 6), "gfx_pixel": (C.c_uint32, [_i, _i]), "gfx_frame_hash": (_i, []),
     "gfx_save_frame": (_i, [_i]), "gfx_stat": (_i, [_i]),
     "gfx_texture": (_i, [_i, _i, _i, _v]), "gfx_texture_update": (None, [_i, _i, _i, _i, _i, _v]), "gfx_texture_free": (None, [_i]),
-    "gfx_triangles": (_i, [_v, _i, _i]), "gfx_clip": (_i, [_i] * 4), "gfx_clip_reset": (_i, []),
+    "gfx_triangles": (_i, [_v, _i, _i]), "gfx_clip": (_i, [_i] * 4), "gfx_clip_reset": (_i, []), "gfx_effect": (_i, [_i, _v, _i]),
     "gfx_poll_event": (_i, [_v]), "gfx_inject_event": (_i, [_i] * 5),
 }
 
@@ -104,6 +104,14 @@ class Engine:
         if lib is None:
             raise AttributeError(name)
         return getattr(lib, name if name.startswith(("gfx_", "p2d_")) else "p2d_" + name)
+
+    def effect(self, name, values=None):
+        """Queues the effect `name` (see fxdefs.EFFECTS) with the parameter values {parameter: value} over what the frame has drawn so far, inside the current clip
+        (gfx_effect). Returns True if it was queued. Call it between gfx_begin and gfx_end, after the draws it should change."""
+        from .fx import pack
+        eid, floats = pack(name, values)
+        arr = array.array("f", floats)
+        return bool(self.lib.gfx_effect(eid, floats_ptr(arr), len(floats)))
 
     def start(self, width, height, window=True):
         """Makes the renderer's picture and the scene. With an X display the renderer opens its window (window=False keeps it offscreen: STRIDE2D_HEADLESS);
@@ -445,6 +453,24 @@ class Viewport:
             return False
         return True
 
+    def _apply_lights(self, lv):
+        """The level's lights as one scene_lights effect for the camera as it is now, so they stay where they were put."""
+        from . import lights
+        if lv is None:
+            return
+        values = lights.effect_values(lv, self.cx, self.cy, self.half, self.width / float(self.height))
+        if values is not None:
+            self.engine.effect("scene_lights", values)
+
+    def _apply_effects(self, lv):
+        """The level's effects, first to last, over everything drawn so far; the disabled ones and any entry the registry no longer accepts draw nothing."""
+        for fx in (lv.effects if lv is not None else ()):
+            if fx.get("enabled", True):
+                try:
+                    self.engine.effect(fx["effect"], fx["values"])
+                except (KeyError, ValueError):
+                    pass
+
     def _draw(self):
         e = self.engine.lib
         self._sync_textures()
@@ -526,4 +552,6 @@ class Viewport:
             e.p2d_draw_meshes(self._texture(spr, 0) if spr is not None else 0)
         if front:
             e.gfx_sprites(floats_ptr(front), len(front) // 12)
+        self._apply_lights(lv)
+        self._apply_effects(lv)
 
