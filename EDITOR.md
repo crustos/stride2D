@@ -24,6 +24,23 @@ A light has a place in cells (x right, y down from the top edge), a radius in ce
 click an empty place to add a light, drag one to move it, right-click one to remove it. The viewport lights its picture with them live (before the level's effects), and they stay
 where they were put when the camera pans or zooms. Moving a light, or a slider, is one undo step.
 
+## Sand
+The Sand window (Window menu, or S in the viewport) switches on falling sand and flowing water in the viewport, simulated on the CPU by `src/terrain/SandSim.cs` (the same simulation the games use), driven by the engine
+(`SandInit`, `SandBrush`, `SandStep`, `SandDraw` in src/engine/Engine.cs) and drawn as one textured quad over the level. The left mouse button paints sand, water, stone or erases (keys 1 2 3, 0; `[` `]` change the brush;
+Space pauses, C clears). The level's solid tiles are stone to it. Settings: brush radius, steps a frame, cells to a tile (a big level gets fewer, at most 400 x 400 cells in all). It is a picture: balls and bodies do not touch it.
+It is not saved in the project. The same painting with the same seed gives the same grain every time (`p2d_sand_hash`).
+
+## Scripts (code editor)
+The Scripts window (Window menu, or the Scripts button) is a code editor for the project's C#: a file list, an editor with line numbers and colours, and a problems list.
+A script is a class marked `[Script, MaxInstances(N)]` with `public Component Self;` and Unity-style callbacks (Update, OnCollisionBegin2D, ...); *New script* writes a template.
+Tick the class under *Runs on the sprite* (it runs on every tile showing that sprite) or *Runs in the game* (once, on a node of its own, whenever a level plays). Scripts read keys and
+the mouse with `Input2D` (`Input2D.Key(Input2D.Left)`, `Input2D.Key('A')`, `Input2D.MouseX`, `Input2D.MouseDown(0)`; src/engine/Input2D.cs).
+
+**Build (F5)** writes the files to a work folder, runs `tools/engine_so.py --scripts DIR` (the engine and the scripts translated to C together, a new libstride2d linked), and swaps it in:
+the viewport's window closes and opens again on the new library, at the same camera, playing again if it was. It needs the .NET SDK for the translator and takes about a minute. Only the C#
+subset builds (tools/ccsharp/README.md); a line outside it comes back in the problems list with its file and line (double-click to go there), and the old engine stays in use.
+Scripts are saved in the project JSON (`"scripts": [{"name", "text"}]`, `"game_scripts": [...]`, and `"scripts": [...]` on a sprite).
+
 ## Project JSON
 `{"format":"stride2d-project","version":1, palette, sprites, tiles, levels}`. Sprite frames are rows of palette key letters; `.` is index 0 (transparent).
 Recolouring an index recolours every pixel that uses it, so scripts animate by changing one palette entry.

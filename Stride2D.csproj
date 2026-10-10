@@ -57,6 +57,7 @@
     <Compile Include="src\terrain\ChainTrace.cs" Feature="terrain" />
     <Compile Include="src\terrain\TerrainLimits.cs" Feature="terrain" />
     <Compile Include="src\terrain\TerrainChunk.cs" Feature="terrain" />
+    <Compile Include="src\terrain\SandSim.cs" Feature="terrain" />
     <Compile Include="src\terrain\TerrainLayer.cs" Feature="terrain" />
   </ItemGroup>
 

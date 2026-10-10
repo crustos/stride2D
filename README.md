@@ -14,7 +14,7 @@ It started as a fork of [Stride](https://github.com/stride3d/stride). The engine
 |---|---|
 | **Scene** | Nodes and components, scripts with Unity-style callbacks, a fixed-step loop |
 | **Physics** | [Box2D](https://github.com/crustos/box2d) (the crustos fork): rigidbodies; box, circle and convex polygon colliders; collision and trigger events; overlap queries; forces and impulses |
-| **Destructible terrain** | A port of [DTerrain](https://github.com/crustos/DTerrain): a pixel bitmap you can dig and build, with box or smooth one-sided chain colliders, rebuilt per chunk, and a dirty rectangle for the renderer |
+| **Destructible terrain** | A port of [DTerrain](https://github.com/crustos/DTerrain): a pixel bitmap you can dig and build, with box or smooth one-sided chain colliders, rebuilt per chunk, and a dirty rectangle for the renderer. Optional falling sand and flowing water on the same bitmap (`EnableSand`, `SandStep`) |
 | **Shattering sprites** | A port of [Unity-2D-Destruction](https://github.com/crustos/Unity-2D-Destruction): break a box or convex polygon into Voronoi or Delaunay fragments, each a rigidbody with a polygon collider and a textured mesh; explosion forces |
 | **Rendering** | A C renderer (`src/native/gfx2d`) that draws the sprite and mesh batches: desktop OpenGL ES 3 (loaded at run time through EGL), a deterministic CPU rasteriser as the fallback, and WebGL2 and WebGPU in a browser. See [Rendering](#rendering) |
 | **Draw data** | Sprite instances, mesh triangle lists and the terrain's dirty rectangle, ready for a renderer |
@@ -163,7 +163,7 @@ static class Game
 }
 ```
 
-`Scripts` is generated at build time from your `[Script]` classes (`tools/gen_scripts.py`). Terrain and shattering are in `samples/Terrain2D` and `samples/Destruction2D`. In outline (`using Stride2D.Terrain; using Stride2D.Destruction;`):
+`Scripts` is generated at build time from your `[Script]` classes (`tools/gen_scripts.py`). Terrain, sand and shattering are in `samples/Terrain2D`, `samples/Sand2D` and `samples/Destruction2D`; `samples/SlimeJumpDestructSand` is a whole level that uses all of them. In outline (`using Stride2D.Terrain; using Stride2D.Destruction;`):
 
 ```csharp
 // destructible terrain: 64 x 32 pixels, 8 pixels per unit, in 2 x 1 chunks, with box colliders

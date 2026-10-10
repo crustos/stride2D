@@ -16,6 +16,11 @@ The editor is several floating windows (project / palette / sprite editor / leve
 
     python3 tools/engine_so.py            -> /tmp/libstride2d.so   (set STRIDE2D_LIB to use another path)
 
+Scripts: the Scripts window is a small code editor for the project's C# (saved in the project file). Mark a class [Script, MaxInstances(N)] with `public Component Self;` and
+callbacks (Update, OnCollisionBegin2D ...), tick it for a sprite (it runs on every tile showing that sprite) or for the game (once per play), and press F5: the scripts are
+translated to C with the engine (needs the .NET SDK, about a minute), a new engine library is linked, the viewport's window closes and opens again on it. Errors come back with
+their line. Scripts read keys and the mouse with Input2D (src/engine/Input2D.cs). Only the C# subset builds (tools/ccsharp/README.md).
+
 Without it everything but the viewport works. Sprites are indexed-palette pixel art (a letter per colour); levels are grids of emoji tiles, which an
 exported level shows as text. See stride2d_editor/asciiart.py for both formats.
 """
