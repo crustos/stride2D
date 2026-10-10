@@ -55,7 +55,7 @@ class EngineApi(unittest.TestCase):
         return n
 
     def test_version_and_the_exports_the_header_promises(self):
-        self.assertEqual(self.e.p2d_version(), 5)
+        self.assertEqual(self.e.p2d_version(), 7)
         header = os.path.join(os.path.dirname(_engine.path), "libstride2d.h")
         if os.path.exists(header):
             import re
@@ -309,6 +309,96 @@ class ViewportWindow(unittest.TestCase):
         self.lib.gfx_inject_event(9, 0, 0, 0, 0)                                # GFX_EVENT_CLOSE, as the window's close button sends it
         self.assertFalse(self.vp.tick(0.0))
         self.assertTrue(self.vp.closed)
+
+
+@unittest.skipUnless(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"), "needs a display (run under xvfb-run)")
+class SandInTheViewport(unittest.TestCase):
+    """The CPU sand in the viewport: painted with the mouse, falls, stops at the level's solid tiles, and is drawn."""
+
+    cell_px = ViewportWindow.cell_px
+
+    def setUp(self):
+        self.project = make_demo_project()
+        self.vp = Viewport(_engine, self.project, W, H)
+        self.vp.show_level(self.project.levels[0])
+        try:
+            self.vp.open()
+        except EngineError as e:
+            self.skipTest(str(e))
+        self.lib = _engine.lib
+        self.vp.sand.enabled = True
+        self.vp.sand.element = 2
+        self.vp.sand.radius = 3
+        self.vp.fit()
+        self.vp.tick(0.0)
+        if not self.vp.sand.enabled:
+            self.skipTest(self.vp.sand.error)
+
+    def tearDown(self):
+        self.vp.close()
+
+    def paint_at_tile(self, col, row, held=1):
+        from .engine import EV_MOUSE_UP
+        x, y = self.cell_px(col, row)
+        self.lib.gfx_inject_event(EV_MOUSE_DOWN, x, y, BTN_LEFT, 0)
+        for _ in range(held):
+            self.vp.tick(0.0)
+        self.lib.gfx_inject_event(EV_MOUSE_UP, x, y, BTN_LEFT, 0)
+        self.vp.tick(0.0)
+
+    def test_the_stone_of_the_level_is_in_the_grid(self):
+        sand, water, stone = self.vp.sand_counts()
+        solid = {k for k, t in self.project.tiles.items() if t.solid and not t.dynamic}
+        lv = self.vp.level
+        tiles = sum(1 for c in lv.cells if c in solid)
+        self.assertGreater(tiles, 0)
+        self.assertEqual(stone, tiles * self.vp.sand_dims()[2] ** 2)
+        self.assertEqual((sand, water), (0, 0))
+
+    def test_the_mouse_paints_the_chosen_element_and_nothing_is_lost_as_it_falls(self):
+        self.vp.sand.element = 3
+        self.paint_at_tile(8, 1)
+        _, water, _ = self.vp.sand_counts()
+        self.assertGreater(water, 10)
+        for _ in range(120):
+            self.vp.tick(0.0)
+        self.assertEqual(self.vp.sand_counts()[1], water)                      # water falls and spreads; it is not made or lost
+
+    def test_it_is_drawn_and_the_pause_stops_it(self):
+        self.paint_at_tile(8, 1)
+        h = self.lib.gfx_frame_hash()
+        self.vp.tick(0.0)
+        self.assertNotEqual(h, self.lib.gfx_frame_hash())                      # a falling pile changes the picture
+        for _ in range(400):
+            self.vp.tick(0.0)
+        self.vp.sand.paused = True
+        self.vp.tick(0.0)
+        h = self.lib.gfx_frame_hash()
+        self.vp.tick(0.0)
+        self.assertEqual(h, self.lib.gfx_frame_hash())
+
+    def test_keys_pick_the_element_and_c_clears_the_grid(self):
+        from .engine import EV_KEY_DOWN
+        self.lib.gfx_inject_event(EV_KEY_DOWN, ord("3"), 0, 0, 0)
+        self.vp.tick(0.0)
+        self.assertEqual(self.vp.sand.element, 3)
+        self.paint_at_tile(8, 1)
+        self.assertGreater(self.vp.sand_counts()[1], 0)
+        self.lib.gfx_inject_event(EV_KEY_DOWN, ord("C"), 0, 0, 0)
+        self.vp.tick(0.0)
+        self.assertEqual(self.vp.sand_counts()[1], 0)
+
+    def test_the_same_painting_gives_the_same_grid(self):
+        self.paint_at_tile(8, 1)
+        for _ in range(60):
+            self.vp.tick(0.0)
+        first = self.lib.p2d_sand_hash()
+        self.vp.sand.generation += 1
+        self.vp.tick(0.0)
+        self.paint_at_tile(8, 1)
+        for _ in range(60):
+            self.vp.tick(0.0)
+        self.assertEqual(first, self.lib.p2d_sand_hash())
 
 
 @unittest.skipUnless(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"), "needs a display (run under xvfb-run)")
