@@ -44,6 +44,7 @@ namespace Stride2D.Terrain
         public int ShapeCount;                  // live native shapes / chains over all chunks
 
         private bool _hasPixels;
+        private SandSim _sand;                           // null until EnableSand
         private World2D _world;
         private List<PixelRect> _rects;
         private ChainSet _chains;
@@ -88,6 +89,7 @@ namespace Stride2D.Terrain
             Pixels[i + 1] = (byte)g;
             Pixels[i + 2] = (byte)b;
             Pixels[i + 3] = (byte)a;
+            if (_sand != null) _sand.SetType(x, y, a > AlphaThreshold ? SandSim.Stone : SandSim.Air);       // a pixel set by hand is stone or air
         }
 
         public int AlphaAt(int x, int y)
@@ -150,7 +152,14 @@ namespace Stride2D.Terrain
             return true;
         }
 
-        /// <summary>One column per pixel column: a range for each run of pixels whose alpha is above the threshold.</summary>
+        /// <summary>Is the pixel ground? Its alpha is above the threshold; with sand enabled, it is stone or sand (water is not ground, however opaque).</summary>
+        private bool GroundAt(int x, int y)
+        {
+            if (_sand != null) return _sand.IsGroundAt(x, y);
+            return AlphaAt(x, y) > AlphaThreshold;
+        }
+
+        /// <summary>One column per pixel column: a range for each run of ground pixels.</summary>
         private void PrepareColumns(TerrainChunk c)
         {
             c.Columns.Clear();
@@ -160,10 +169,10 @@ namespace Stride2D.Terrain
                 int y = 0;
                 while (y < c.Height)
                 {
-                    if (AlphaAt(c.X0 + x, c.Y0 + y) > AlphaThreshold)
+                    if (GroundAt(c.X0 + x, c.Y0 + y))
                     {
                         int min = y;
-                        while (y < c.Height && AlphaAt(c.X0 + x, c.Y0 + y) > AlphaThreshold) y++;
+                        while (y < c.Height && GroundAt(c.X0 + x, c.Y0 + y)) y++;
                         c.Columns[x].AddRange(min, y - 1);
                     }
                     else y++;
@@ -237,6 +246,11 @@ namespace Stride2D.Terrain
                 else SetPixel(x, y, r, g, b, 255);
             }
             if (changed) MarkDirty(x, y0, x, y1);
+            if (_sand != null)                                   // grains above and beside what was dug or built may now fall or flow
+            {
+                _sand.WakeAround(x, y0);
+                _sand.WakeAround(x, y1);
+            }
             return changed;
         }
 
@@ -251,6 +265,98 @@ namespace Stride2D.Terrain
             if (localX == c.Width - 1 && c.Right != null && c.Right.Columns[0].Touches(localY0, localY1)) c.Right.Dirty = true;
             if (localY0 == 0 && c.Down != null && c.Down.Columns[localX].isWithin(c.Down.Height - 1)) c.Down.Dirty = true;
             if (localY1 == c.Height - 1 && c.Up != null && c.Up.Columns[localX].isWithin(0)) c.Up.Dirty = true;
+        }
+
+        // ---- sand ------------------------------------------------------------------------------
+
+        /// <summary>The sand simulation of this layer, null until <see cref="EnableSand"/>.</summary>
+        public SandSim Sand { get { return _sand; } }
+
+        /// <summary>
+        /// Lets the pixels move: falling sand and flowing water on the terrain's own bitmap (see <see cref="SandSim"/>). Every pixel that is ground now
+        /// (alpha above the threshold) is stone and stays where it is; digging and building keep working on it. Sand and water you add with
+        /// <see cref="AddElement"/> or <see cref="Sprinkle"/>; <see cref="SandStep"/> moves them, once a frame, before <see cref="Update"/>.
+        /// <para/>
+        /// Settled sand is ground: it gets colliders, rebuilt when a chunk's sand has been still for a few steps (or has been changing for a while: a steady pour).
+        /// Grains in motion and water have none.
+        /// <para/>
+        /// The simulation is an arena class of <see cref="TerrainLimits.Layers"/> (like the layer itself, a slot is not given back when a layer is destroyed),
+        /// and its cells cost about 2 bytes a pixel on top of the bitmap's 4.
+        /// </summary>
+        /// <returns>False if the layer has no bitmap, or sand is already on.</returns>
+        public bool EnableSand()
+        {
+            if (!_hasPixels || _sand != null) return false;
+            SandSim sim = new SandSim(Width, Height, ChunksX, ChunksY);
+            if (sim == null) return false;
+            int n = Width * Height;
+            for (int i = 0; i < n; i++)
+                if (Pixels[i * 4 + 3] > AlphaThreshold) sim.SetRaw(i, SandSim.Stone);
+            _sand = sim;
+            return true;
+        }
+
+        /// <summary>Puts one grain of SandSim.Sand or SandSim.Water on an air pixel. False if the pixel is not air, or sand is not enabled.</summary>
+        public bool AddElement(int x, int y, int element)
+        {
+            if (_sand == null) return false;
+            if (!_sand.Spawn(Pixels, x, y, element)) return false;
+            MarkDirty(x, y, x, y);
+            return true;
+        }
+
+        /// <summary>Fills the air pixels within a radius (in pixels) of (cx, cy) with an element.</summary>
+        /// <returns>How many grains were added.</returns>
+        public int Sprinkle(int cx, int cy, int radius, int element)
+        {
+            if (_sand == null) return 0;
+            int added = 0;
+            for (int dy = -radius; dy <= radius; dy++)
+            {
+                for (int dx = -radius; dx <= radius; dx++)
+                {
+                    if (dx * dx + dy * dy > radius * radius) continue;
+                    if (AddElement(cx + dx, cy + dy, element)) added++;
+                }
+            }
+            return added;
+        }
+
+        /// <summary>
+        /// One step of the sand and water. The moved pixels are marked dirty, and the chunks whose sand has settled get their ground rebuilt from the
+        /// pixels (their shapes follow at the next <see cref="Update"/>).
+        /// </summary>
+        /// <returns>How many grains moved.</returns>
+        public int SandStep()
+        {
+            if (_sand == null) return 0;
+            int moves = _sand.Step(Pixels);
+            if (_sand.StepDirty)
+            {
+                MarkDirty(_sand.DirtyX0, _sand.DirtyY0, _sand.DirtyX1, _sand.DirtyY1);
+                _sand.ClearStepDirty();
+            }
+            if (Ok) PublishSand();
+            return moves;
+        }
+
+        private void PublishSand()
+        {
+            for (int i = 0; i < Chunks.Count; i++)
+            {
+                if (_sand.Ready[i] == 0) continue;
+                TerrainChunk c = Chunks[i];
+                PrepareColumns(c);
+                c.Dirty = true;
+                if (ColliderKind == Chains)                      // an outline at a chunk's edge depends on the ground just across it
+                {
+                    if (c.Left != null) c.Left.Dirty = true;
+                    if (c.Right != null) c.Right.Dirty = true;
+                    if (c.Down != null) c.Down.Dirty = true;
+                    if (c.Up != null) c.Up.Dirty = true;
+                }
+                _sand.Published(i);
+            }
         }
 
         // ---- shapes ----------------------------------------------------------------------------
@@ -373,6 +479,7 @@ namespace Stride2D.Terrain
             }
             Chunks.Clear();
             Ok = false;
+            _sand = null;
             _world.UnpinWorld();
         }
     }
