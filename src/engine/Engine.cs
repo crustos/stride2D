@@ -9,6 +9,7 @@
 // sprites and meshes, which DrawSprites and DrawMeshes add to the frame the host began with gfx_begin and ends with gfx_end (that shows it in the window).using System;
 using Stride2D;
 using Stride2D.Destruction;
+using Stride2D.Terrain;
 using Stride2D.Native.Box2D;
 using Stride2D.Native.Gfx2D;
 
@@ -24,7 +25,7 @@ static class Engine
     static void SetBodyAt(int i, Rigidbody2D rb) { bodies[i] = rb; }
 
     /// <summary>Bump when a function below changes its meaning: the host checks it.</summary>
-    public static int Version() { return 5; }
+    public static int Version() { return 7; }
 
     // ---- the process: renderer and scene -------------------------------------------------------------------------------------
 
@@ -36,6 +37,7 @@ static class Engine
         if (scene == null)                    // the scene is an arena class of capacity 1: a second `new Scene2D()` would have no slot, so Init after Shutdown reuses it
         {
             Scripts.Init();
+            Input2D.Init();
             scene = new Scene2D();
             bodies = new Rigidbody2D[CoreLimits.Nodes];
             blaster = new Destruction2D(scene, 1u);
@@ -47,6 +49,7 @@ static class Engine
     public static void Shutdown()
     {
         if (ready == 0) return;
+        SandFree();
         GFX.Shutdown();
         ready = 0;
     }
@@ -263,6 +266,177 @@ static class Engine
     {
         if (ready == 0) return;
         scene.SetGravity(x, y);
+    }
+
+    // ---- scripts and input -----------------------------------------------------------------------------------------------------
+
+    /// <summary>How many [Script] classes this library was built with (the editor's Build puts the project's scripts in, in the order of its manifest).</summary>
+    public static int ScriptCount()
+    {
+        return ScriptTable.Count();
+    }
+
+    /// <summary>Adds the script with this number (its place in the manifest) to a node. 1 if it was added, 0 if the node is gone, the number is wrong or all of its instances are in use.</summary>
+    public static int AttachScript(int node, int script)
+    {
+        if (ready == 0) return 0;
+        Node n = scene.NodeAt(node);
+        if (n == null) return 0;
+        return ScriptTable.Add(n, script);
+    }
+
+    /// <summary>A key went down (1) or up (0): the codes are the viewport's (gfx2d.h), which are capital letters and digits as characters.</summary>
+    public static void SetKey(int key, int down)
+    {
+        Input2D.SetKey(key, down);
+    }
+
+    /// <summary>The mouse in world units, and which buttons are held (bit 0 left, 1 middle, 2 right).</summary>
+    public static void SetMouse(float x, float y, int buttons)
+    {
+        Input2D.SetMouse(x, y, buttons);
+    }
+
+    /// <summary>Lets go of every key and button (the play mode starts or stops).</summary>
+    public static void ClearInput()
+    {
+        Input2D.Clear();
+    }
+
+    // ---- sand: the CPU simulation (SandSim) as a picture over the level -----------------------------------------------------------
+    // The editor's sand mode. The grid has no physics: stone, sand and water are cells of a texture the engine moves itself (SandStep) and draws (SandDraw).
+    // Row 0 is the bottom, like the world. Elements: 0 air (erase), 1 stone, 2 sand, 3 water.
+
+    static SandSim sandSim;                // an arena class with a few slots: made once, and Reset for every new grid
+    static byte[] sandPixels;
+    static float[] sandQuad;
+    static int sandTexture;
+    static int sandReady;
+    static int sandDirty;
+    static int sandW;
+    static int sandH;
+
+    /// <summary>Makes an empty grid of width x height cells (the texture is that size). 1 if it is ready, 0 if there is no room for a texture or the size is wrong.</summary>
+    public static int SandInit(int width, int height)
+    {
+        if (ready == 0 || width < 1 || height < 1 || width > 4096 || height > 4096) return 0;
+        SandFree();
+        int cx = 1;                                     // chunks of at most 32 cells a side, as few as will divide the grid evenly
+        while (cx < width && (width % cx != 0 || width / cx > 32)) cx++;
+        int cy = 1;
+        while (cy < height && (height % cy != 0 || height / cy > 32)) cy++;
+        if (sandSim == null) sandSim = new SandSim(width, height, cx, cy);
+        else sandSim.Reset(width, height, cx, cy);
+        if (sandSim == null) return 0;
+        sandPixels = new byte[width * height * 4];
+        sandTexture = GFX.Texture(width, height, 0, sandPixels);
+        if (sandTexture == 0) return 0;
+        sandQuad = new float[48];
+        sandW = width;
+        sandH = height;
+        sandReady = 1;
+        sandDirty = 0;
+        return 1;
+    }
+
+    /// <summary>Lets go of the grid's texture (the simulation stays for the next SandInit).</summary>
+    public static void SandFree()
+    {
+        if (sandReady == 0) return;
+        GFX.TextureFree(sandTexture);
+        sandTexture = 0;
+        sandReady = 0;
+    }
+
+    /// <summary>The seed of the random choices: the same seed and the same calls give the same cells.</summary>
+    public static void SandSeed(int seed)
+    {
+        if (sandReady == 0) return;
+        sandSim.Seed((uint)seed);
+    }
+
+    /// <summary>Puts an element in one cell: air only gets stone, sand or water, and 0 (air) erases whatever is there. 1 if the cell changed.</summary>
+    public static int SandSet(int x, int y, int element)
+    {
+        if (sandReady == 0 || !sandSim.InBounds(x, y)) return 0;
+        if (element == SandSim.Air)
+        {
+            if (sandSim.ElementAt(x, y) == SandSim.Air) return 0;
+            sandSim.WriteColor(sandPixels, x, y, SandSim.Air);
+            sandSim.SetType(x, y, SandSim.Air);
+            sandDirty = 1;
+            return 1;
+        }
+        if (!sandSim.Spawn(sandPixels, x, y, element)) return 0;
+        sandDirty = 1;
+        return 1;
+    }
+
+    /// <summary>A disc of an element, radius in cells (the middle cell and the ones within it). Returns how many cells changed.</summary>
+    public static int SandBrush(int cx, int cy, int radius, int element)
+    {
+        if (sandReady == 0) return 0;
+        int n = 0;
+        for (int dy = -radius; dy <= radius; dy++)
+            for (int dx = -radius; dx <= radius; dx++)
+                if (dx * dx + dy * dy <= radius * radius) n += SandSet(cx + dx, cy + dy, element);
+        return n;
+    }
+
+    /// <summary>Advances the sand by `steps` simulation steps. Returns how many grains moved.</summary>
+    public static int SandStep(int steps)
+    {
+        if (sandReady == 0) return 0;
+        int moved = 0;
+        for (int i = 0; i < steps; i++) moved += sandSim.Step(sandPixels);
+        if (moved > 0 || sandSim.StepDirty) sandDirty = 1;
+        sandSim.ClearStepDirty();
+        return moved;
+    }
+
+    /// <summary>Adds the grid to the frame in progress as one textured quad over the world rectangle (x0, y0)-(x1, y1) (the bottom left and the top right). 1 if it drew.</summary>
+    public static int SandDraw(float x0, float y0, float x1, float y1)
+    {
+        if (ready == 0 || sandReady == 0) return 0;
+        if (sandDirty != 0)
+        {
+            GFX.TextureUpdate(sandTexture, 0, 0, sandW, sandH, sandPixels);
+            sandDirty = 0;
+        }
+        SandVertex(0, x0, y0, 0f, 0f);
+        SandVertex(1, x1, y0, 1f, 0f);
+        SandVertex(2, x1, y1, 1f, 1f);
+        SandVertex(3, x0, y0, 0f, 0f);
+        SandVertex(4, x1, y1, 1f, 1f);
+        SandVertex(5, x0, y1, 0f, 1f);
+        return GFX.Triangles(sandQuad, 6, sandTexture) > 0 ? 1 : 0;
+    }
+
+    static void SandVertex(int i, float x, float y, float u, float v)
+    {
+        int o = i * 8;
+        sandQuad[o] = x;
+        sandQuad[o + 1] = y;
+        sandQuad[o + 2] = u;
+        sandQuad[o + 3] = v;
+        sandQuad[o + 4] = 1f;
+        sandQuad[o + 5] = 1f;
+        sandQuad[o + 6] = 1f;
+        sandQuad[o + 7] = 1f;
+    }
+
+    /// <summary>How many cells hold an element (0 when there is no grid).</summary>
+    public static int SandCount(int element)
+    {
+        if (sandReady == 0) return 0;
+        return sandSim.Count(element);
+    }
+
+    /// <summary>A hash of the grid's cells: the same cells, the same number.</summary>
+    public static int SandHash()
+    {
+        if (sandReady == 0) return 0;
+        return (int)(sandSim.Hash() & 0x7fffffffu);
     }
 
     // ---- a frame ---------------------------------------------------------------------------------------------------------------
