@@ -14,6 +14,13 @@ What goes in it:
   4. Box2D and its shim, statically.
 
 The library needs only libdl, libm and libc at run time (the renderer loads EGL, GLES and X11 with dlopen, and falls back to its CPU rasteriser).
+
+Scripts. --scripts DIR takes a folder of script files, whose extension says the language (tools/script_langs.py): .cs (C#) is built into the library by the C# translator;
+.cpp (C++), .rs (Rust) and .py (RPython) are scanned (their markers, capacities, node fields and callbacks are checked, and a mistake is an error with its file and line), then
+lowered to C by Crust's front ends (tools/cpprust.py, shivyc/crust.py, tools/py2c.py: the subsets they accept, never g++, rustc or CPython), compiled by the C compiler and linked into
+the library, each behind a generated C# script that the scene calls (tools/script_native.py). Names are unique across all of them, since sprites and the game attach by name.
+Crust is the sibling folder `crust` (or $CRUST_HOME).
+
 Build needs what `python3 build.py deps`, `native` and `ccsharp` set up.
 """
 import argparse
@@ -30,6 +37,8 @@ sys.path.insert(0, HERE)
 import gfx_build      # noqa: E402
 import player_build   # noqa: E402
 import gen_scripts    # noqa: E402
+import script_langs   # noqa: E402
+import script_native  # noqa: E402
 
 C_TYPES = {"int": "int", "float": "float", "void": "void"}
 
@@ -132,8 +141,9 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("-o", "--out", default="/tmp/libstride2d.so", help="the library to write (default /tmp/libstride2d.so); libstride2d.h is written beside it")
     ap.add_argument("--cc", default=os.environ.get("CC") or "cc")
-    ap.add_argument("--scripts", metavar="DIR", help="a folder of .cs files whose [Script] classes are built into the library (Engine.AttachScript attaches them by number); "
-                    "writes OUT.scripts.json beside the library: the numbers. Errors are printed as File.cs(line,col): error ...")
+    ap.add_argument("--scripts", metavar="DIR", help="a folder of script files (.cs, .cpp, .rs, .py): the [Script] classes of the .cs files are built into the library (Engine.AttachScript "
+                    "attaches them by number), the C++, Rust and RPython scripts are lowered to C by Crust (cpprust, crust, py2c), compiled by the C compiler and linked in (tools/script_native.py); writes OUT.scripts.json beside the library: the numbers "
+                    "and languages of what was built. Errors and warnings are printed as File.ext(line,col): error ...")
     ap.add_argument("--work", metavar="DIR", help="the work folder (default build/engine); the editor's Build uses its own, so the engine's is left alone")
     a = ap.parse_args()
 
@@ -143,15 +153,48 @@ def main():
     shutil.rmtree(work, ignore_errors=True)
     os.makedirs(work)
     script_files, found = user_scripts(os.path.abspath(a.scripts)) if a.scripts else ([], [])
+    others, problems = script_langs.scan_folder(os.path.abspath(a.scripts)) if a.scripts else ([], [])
+    if problems:
+        sys.exit("\n".join(problems))
+    named = {}
+    for n, _cap, path in found:
+        named.setdefault(n, []).append(os.path.basename(path))
+    for sc in others:
+        named.setdefault(sc["name"], []).append(os.path.basename(sc["where"].rsplit(":", 1)[0]))
+    for n, files in sorted(named.items()):
+        if len(files) > 1:
+            sys.exit("error GEN0002: two scripts are called %s (%s)" % (n, " and ".join(files)))
+    for note in script_langs.unbuilt_notes(others):          # (said now, so that they are in the output even if the translator refuses a C# script after this)
+        print(note)
+    # the scripts of the other languages that are built: each is a generated C# proxy in the script table (script_native.py), and its own object file in the link
+    glue_dir = os.path.join(work, "native")
+    os.makedirs(glue_dir)
+    natives = [sc for sc in others if sc["language"] in script_native.BUILDERS]
+    proxies = []
+    for sc in natives:
+        proxy = os.path.join(glue_dir, sc["name"] + ".proxy.cs")
+        with open(proxy, "w", newline="\n") as f:
+            f.write(script_native.proxy_cs(sc))
+        proxies.append(proxy)
+    entries = [(n, c, p, "csharp") for n, c, p in found] + [(sc["name"], sc["capacity"], pr, sc["language"]) for sc, pr in zip(natives, proxies)]
+    ids = {e[0]: i for i, e in enumerate(entries)}
+    sources_of = {sc["name"]: sc["where"].rsplit(":", 1)[0] for sc in natives}
     table = os.path.join(work, "ScriptTable.g.cs")
     with open(table, "w", newline="\n") as f:
-        f.write(script_table_cs(found))
+        f.write(script_table_cs([e[:3] for e in entries]))
     for need in (player_build.SHIM_A, player_build.BOX2D_LIB):
         if not os.path.exists(need):
             sys.exit("engine_so: %s is missing (python3 build.py native)" % need)
 
+    def native_extra(bindings_dir, include_dir):
+        with open(os.path.join(bindings_dir, "P2DNative.c.cs"), "w", newline="\n") as fh:
+            fh.write(script_native.bindings_cs(natives))
+        with open(os.path.join(include_dir, "p2d_native.h"), "w", newline="\n") as fh:
+            fh.write(script_native.glue_prototypes(natives))
+
     print("== translating src/engine/Engine.cs with the runtime (%d exported functions)" % len(api))
-    c_file, diags, raw = player_build.translate([cs, os.path.join(ROOT, "src", "engine", "Input2D.cs"), table] + script_files, work, "Engine")
+    c_file, diags, raw = player_build.translate([cs, os.path.join(ROOT, "src", "engine", "Input2D.cs"), table] + script_files + proxies, work, "Engine",
+                                                extra=native_extra if natives else None)
     if c_file is None:
         print("\n".join(diags) if diags else raw[-2000:])
         sys.exit("engine_so: the translator refused Engine.cs (see above)")
@@ -162,19 +205,32 @@ def main():
     shutil.copy2(player_build.GFX_H, work)
     with open(os.path.join(work, "engine_exports.c"), "w", newline="\n") as f:
         f.write(exports_c(api))
+    native_objs = []
+    if natives:
+        shutil.copy2(os.path.join(work, "generated", "include", "p2d_native.h"), work)
+        with open(os.path.join(glue_dir, "stride2d.h"), "w", newline="\n") as f:
+            f.write(script_native.engine_header(api, ids))
+        for sc in natives:
+            print("== %s script %s" % (script_langs.NAMES[sc["language"]], sc["name"]))
+            try:
+                made = script_native.BUILDERS[sc["language"]](sc, sc["where"].rsplit(":", 1)[0], glue_dir, work, a.cc, api, ids)
+                native_objs += made if isinstance(made, list) else [made]
+            except script_native.Failed as e:
+                print(str(e))
+                sys.exit("engine_so: the %s script %s did not build (see above)" % (script_langs.NAMES[sc["language"]], sc["name"]))
 
     print("== the renderer")
     gfx = gfx_build.build(quiet=True)
     print("== linking %s" % a.out)
     out = os.path.abspath(a.out)
     os.makedirs(os.path.dirname(out), exist_ok=True)
-    cmd = ([a.cc, "-shared", "-fPIC", "-O2", "-ffp-contract=off", "-w", "-I", work, "-o", out, os.path.join(work, "engine_exports.c"),
+    cmd = ([a.cc, "-shared", "-fPIC", "-O2", "-ffp-contract=off", "-w", "-I", work, "-o", out, os.path.join(work, "engine_exports.c")] + native_objs + [
             "-Wl,--whole-archive", gfx["static"], "-Wl,--no-whole-archive", player_build.SHIM_A, player_build.BOX2D_LIB, "-ldl", "-lm"])
     run(cmd, cwd=work)
     with open(os.path.join(os.path.dirname(out), "libstride2d.h"), "w", newline="\n") as f:
         f.write(header_h(api))
     with open(out + ".scripts.json", "w", newline="\n") as f:
-        json.dump([{"id": i, "name": n, "capacity": c, "file": os.path.basename(p)} for i, (n, c, p) in enumerate(found)], f, indent=1)
+        json.dump([{"id": i, "name": n, "capacity": c, "language": lang, "file": os.path.basename(sources_of.get(n, p))} for i, (n, c, p, lang) in enumerate(entries)], f, indent=1)
     print("   built %s  (%d KiB)" % (out, os.path.getsize(out) // 1024))
     return 0
 

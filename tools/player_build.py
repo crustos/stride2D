@@ -168,7 +168,7 @@ def generate_only(game, out_dir):
     gen_scripts.generate(os.path.join(gen, "Scripts.g.cs"), game)
 
 
-def translate(game, out_dir, main_class, dna=False):
+def translate(game, out_dir, main_class, dna=False, extra=None):
     gen = os.path.join(out_dir, "generated")
     inc = os.path.join(gen, "include")
     shutil.rmtree(gen, ignore_errors=True)
@@ -177,6 +177,8 @@ def translate(game, out_dir, main_class, dna=False):
     shutil.copy2(SHIM_H, inc)
     if uses_gfx(game):
         shutil.copy2(GFX_H, inc)
+    if extra:
+        extra(os.path.join(gen, "bindings", "c"), inc)           # more bindings and headers that the caller's own sources need (the engine library's scripts in other languages)
     sink = os.path.join(gen, "Scripts.g.cs")
     gen_scripts.generate(sink, game)
     c_dir = os.path.join(out_dir, "c")
