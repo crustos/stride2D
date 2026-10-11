@@ -6,7 +6,8 @@
 // in this runtime, names whatever reuses its slot once the node is destroyed.
 //
 // The renderer (src/native/gfx2d) is exported as it is (gfx_*): the host draws its own things (a tile map, sprite frames) in the same frame as the scene's
-// sprites and meshes, which DrawSprites and DrawMeshes add to the frame the host began with gfx_begin and ends with gfx_end (that shows it in the window).using System;
+// sprites and meshes, which DrawSprites and DrawMeshes add to the frame the host began with gfx_begin and ends with gfx_end (that shows it in the window).
+using System;
 using Stride2D;
 using Stride2D.Destruction;
 using Stride2D.Terrain;
@@ -20,12 +21,15 @@ static class Engine
     static int sprites;
     static Rigidbody2D[] bodies;           // a node's rigidbody by node index (set by AddBody), for velocities and impulses
     static Destruction2D blaster;              // only used for its AddExplosionForce
+    static float[] shared;                 // the scripts' common numbers (GetGlobal / SetGlobal): what the C# sample keeps in a static class
+    static float rayX;
+    static float rayY;
 
     static Rigidbody2D BodyAt(int i) { return bodies[i]; }
     static void SetBodyAt(int i, Rigidbody2D rb) { bodies[i] = rb; }
 
     /// <summary>Bump when a function below changes its meaning: the host checks it.</summary>
-    public static int Version() { return 7; }
+    public static int Version() { return 8; }
 
     // ---- the process: renderer and scene -------------------------------------------------------------------------------------
 
@@ -41,6 +45,7 @@ static class Engine
             scene = new Scene2D();
             bodies = new Rigidbody2D[CoreLimits.Nodes];
             blaster = new Destruction2D(scene, 1u);
+            shared = new float[256];
         }
         ready = 1;
         return 1;
@@ -143,6 +148,7 @@ static class Engine
             Node n = scene.NodeAt(i);
             if (n != null) scene.Destroy(n);
         }
+        for (int g = 0; g < 256; g++) shared[g] = 0f;
         scene.SetGravity(0f, -9.81f);
         // destroyed nodes are freed at the end of a frame: run one empty one so their slots come back before the next NewNode
         Scripts.Tick(scene, 1f / 60f);
@@ -207,6 +213,19 @@ static class Engine
         Collider2D c = scene.NewBoxCollider(n, width, height);
         if (c == null) return 0;
         c.Friction = friction;
+        scene.Finish(c.Self);
+        return 1;
+    }
+
+    /// <summary>A box that is a trigger (nothing bumps into it, but a probe over its layer finds it: a vine to climb).</summary>
+    public static int AddBoxTrigger(int node, float width, float height)
+    {
+        if (ready == 0) return 0;
+        Node n = scene.NodeAt(node);
+        if (n == null) return 0;
+        Collider2D c = scene.NewBoxCollider(n, width, height);
+        if (c == null) return 0;
+        c.IsTrigger = true;
         scene.Finish(c.Self);
         return 1;
     }
@@ -296,6 +315,162 @@ static class Engine
     {
         Input2D.SetMouse(x, y, buttons);
     }
+
+    /// <summary>1 while the node exists (it was made, and not destroyed), else 0.</summary>
+    public static int NodeAlive(int node)
+    {
+        if (ready == 0) return 0;
+        if (scene.NodeAt(node) == null) return 0;
+        return 1;
+    }
+
+    /// <summary>A number the game keeps on a node: what kind of thing it is, or a message to the scripts that look (0 until it is set).</summary>
+    public static void SetTag(int node, int tag)
+    {
+        if (ready == 0) return;
+        Node n = scene.NodeAt(node);
+        if (n == null) return;
+        n.Tag = tag;
+    }
+
+    /// <summary>The node's tag, or -1 if there is no such node: a script that scans the nodes for one kind of thing asks this.</summary>
+    public static int GetTag(int node)
+    {
+        if (ready == 0) return -1;
+        Node n = scene.NodeAt(node);
+        if (n == null) return -1;
+        return n.Tag;
+    }
+
+    /// <summary>How many node slots have been used (the highest index plus one): the range a scan of the nodes covers.</summary>
+    public static int NodeSlots()
+    {
+        if (ready == 0) return 0;
+        return scene.NodeHighWater;
+    }
+
+    // ---- what scripts that are not C# need to look around and to talk to each other --------------------------------------------------
+
+    /// <summary>A number every script can read and write (index 0..255), 0 at the start of a play: the scripts' common memory, in place of a C# static class.</summary>
+    public static void SetGlobal(int index, float value)
+    {
+        if (ready == 0 || index < 0 || index >= 256) return;
+        shared[index] = value;
+    }
+
+    public static float GetGlobal(int index)
+    {
+        if (ready == 0 || index < 0 || index >= 256) return 0f;
+        return shared[index];
+    }
+
+    /// <summary>The physics layer (0..31) of the node's colliders: set it before adding them. Layer 0 is what the editor's walls are.</summary>
+    public static void SetLayer(int node, int layer)
+    {
+        if (ready == 0) return;
+        Node n = scene.NodeAt(node);
+        if (n == null) return;
+        n.Layer = layer;
+    }
+
+    /// <summary>A node's collider (its first), by the number a ray reports, or -1 if it has none.</summary>
+    public static int ColliderOf(int node)
+    {
+        if (ready == 0) return -1;
+        Node n = scene.NodeAt(node);
+        if (n == null) return -1;
+        Component c = scene.Find(n, ComponentKind.BoxCollider2D);
+        if (c == null) c = scene.Find(n, ComponentKind.CircleCollider2D);
+        if (c == null || c.Collider == null) return -1;
+        return c.Collider.ColliderIndex;
+    }
+
+    /// <summary>A ray from (ox, oy) along (dx, dy), a unit direction, over layers in `mask` (bit n = layer n): the collider it hits first, or -1; where is RayX / RayY.</summary>
+    public static int Raycast(float ox, float oy, float dx, float dy, float distance, int mask)
+    {
+        if (ready == 0) return -1;
+        int hit = scene.Physics.Sim.Raycast(ox, oy, dx, dy, distance, (uint)mask, false);
+        if (hit >= 0)
+        {
+            rayX = scene.Physics.Sim.HitX;
+            rayY = scene.Physics.Sim.HitY;
+        }
+        return hit;
+    }
+
+    public static float RayX() { return rayX; }
+
+    public static float RayY() { return rayY; }
+
+    /// <summary>How many colliders on the layers in `mask` overlap the box centred at (cx, cy) with half sizes (hw, hh).</summary>
+    public static int OverlapBox(float cx, float cy, float hw, float hh, int mask)
+    {
+        if (ready == 0) return 0;
+        return scene.Physics.Sim.OverlapBox(cx, cy, hw, hh, 0f, (uint)mask, true);
+    }
+
+    /// <summary>Switches a node (and what is on it) off or on: an inactive node has no collisions, no callbacks and is not drawn.</summary>
+    public static void SetActive(int node, int active)
+    {
+        if (ready == 0) return;
+        Node n = scene.NodeAt(node);
+        if (n == null) return;
+        scene.SetActive(n, active != 0);
+    }
+
+    public static int NodeActive(int node)
+    {
+        if (ready == 0) return 0;
+        Node n = scene.NodeAt(node);
+        if (n == null) return 0;
+        if (n.ActiveInHierarchy) return 1;
+        return 0;
+    }
+
+    /// <summary>What a node looks like, for the host to draw: field 0 shape (-1: no sprite), 1 width, 2 height (the scale counted), 3 red, 4 green, 5 blue, 6 alpha.</summary>
+    public static float SpriteInfo(int node, int field)
+    {
+        if (ready == 0) return -1f;
+        Node n = scene.NodeAt(node);
+        if (n == null) return -1f;
+        Component c = scene.Find(n, ComponentKind.SpriteRenderer2D);
+        if (c == null || c.Sprite == null) return -1f;
+        SpriteRenderer2D s = c.Sprite;
+        if (field == 0) return s.Shape;
+        if (field == 1) return s.Width * n.LossyScaleX();
+        if (field == 2) return s.Height * n.LossyScaleY();
+        if (field == 3) return s.R;
+        if (field == 4) return s.G;
+        if (field == 5) return s.B;
+        return s.A;
+    }
+
+    public static float MathSqrt(float x) { return MathF.Sqrt(x); }
+
+    public static float MathSin(float x) { return MathF.Sin(x); }
+
+    public static float MathCos(float x) { return MathF.Cos(x); }
+
+    public static float MathAtan2(float y, float x) { return MathF.Atan2(y, x); }
+
+    /// <summary>1 while the key is held (the codes of SetKey), else 0: what a script that is not C# asks.</summary>
+    public static int KeyDown(int key)
+    {
+        if (Input2D.Key(key)) return 1;
+        return 0;
+    }
+
+    /// <summary>1 while the mouse button (0 left, 1 middle, 2 right) is held, else 0.</summary>
+    public static int MouseDown(int button)
+    {
+        if (Input2D.MouseDown(button)) return 1;
+        return 0;
+    }
+
+    /// <summary>The mouse's place in world units.</summary>
+    public static float MouseWorldX() { return Input2D.MouseX; }
+
+    public static float MouseWorldY() { return Input2D.MouseY; }
 
     /// <summary>Lets go of every key and button (the play mode starts or stops).</summary>
     public static void ClearInput()
