@@ -30,19 +30,37 @@ The Sand window (Window menu, or S in the viewport) switches on falling sand and
 Space pauses, C clears). The level's solid tiles are stone to it. Settings: brush radius, steps a frame, cells to a tile (a big level gets fewer, at most 400 x 400 cells in all). It is a picture: balls and bodies do not touch it.
 It is not saved in the project. The same painting with the same seed gives the same grain every time (`p2d_sand_hash`).
 
-## Scripts (code editor)
-The Scripts window (Window menu, or the Scripts button) is a code editor for the project's C#: a file list, an editor with line numbers and colours, and a problems list.
-A script is a class marked `[Script, MaxInstances(N)]` with `public Component Self;` and Unity-style callbacks (Update, OnCollisionBegin2D, ...); *New script* writes a template.
-Tick the class under *Runs on the sprite* (it runs on every tile showing that sprite) or *Runs in the game* (once, on a node of its own, whenever a level plays). Scripts read keys and
-the mouse with `Input2D` (`Input2D.Key(Input2D.Left)`, `Input2D.Key('A')`, `Input2D.MouseX`, `Input2D.MouseDown(0)`; src/engine/Input2D.cs).
+## Scripts
+The Scripts window (Window menu) is a code editor for the project's scripts. A script is one file in one language: pick C#, C++, Rust or RPython in the Language box, then New script (the file list shows `Name.cs`, `.cpp`, `.rs` or `.py`).
+A class is a script when it carries its language's marker, and sprites and the game attach scripts by that class name, whatever the language:
 
-**Build (F5)** writes the files to a work folder, runs `tools/engine_so.py --scripts DIR` (the engine and the scripts translated to C together, a new libstride2d linked), and swaps it in:
-the viewport's window closes and opens again on the new library, at the same camera, playing again if it was. It needs the .NET SDK for the translator and takes about a minute. Only the C#
-subset builds (tools/ccsharp/README.md); a line outside it comes back in the problems list with its file and line (double-click to go there), and the old engine stays in use.
-Scripts are saved in the project JSON (`"scripts": [{"name", "text"}]`, `"game_scripts": [...]`, and `"scripts": [...]` on a sprite).
+| language | marker | callbacks (all optional) |
+|---|---|---|
+| C# | `[Script, MaxInstances(16)] class Name` | `Start`, `Update`, `OnCollisionBegin2D`, ... |
+| C++ | `PROWL_SCRIPT(16) class Name` (an empty macro) | the same names |
+| Rust | `#[script(max_instances = 16)] struct Name` with an `impl` | `start`, `update`, `on_collision_begin_2d`, ... |
+| RPython | `@script(max_instances=16) class Name` | `start`, `update`, `on_collision_begin_2d`, ... |
+
+A new script is a template with its marker and an `Update`; the editor colours, and indents (after `{`, or `:` in Python), by the file's language.
+
+Calls the C++, Rust and RPython scripts also have, for scripts that must find each other: `set_tag(node, n)` / `get_tag(node)` (a number on a node, -1 if there is none), `node_alive(node)` and `node_slots()` (how many node slots there are to scan), `set_global(i, v)` / `get_global(i)` (256 numbers all scripts share, zero when a level starts), `set_layer`, `raycast(ox, oy, dx, dy, distance, layer_mask)` with `ray_x()` / `ray_y()` and `overlap_box(cx, cy, hw, hh, layer_mask)` to look around (layer 0 is the walls), `add_box_trigger`, `set_active`, `attach_script(node, SCRIPT_<NAME>)` for nodes a script makes, `key_down`, `mouse_down`, `mouse_world_x/y` and `math_sqrt/sin/cos/atan2`. A node that has a sprite (`add_sprite`) is drawn by the viewport wherever it is. In the viewport, a tile whose sprite has scripts is drawn where its node is (a script that moves it moves the picture) and is gone when the script destroys the node. `samples/SlimeJumpRust` is a whole game made this way (climbing, blaster, lasso, turrets, crumbly platforms, checkpoints and a bot).
+
+**C++, Rust and RPython are the Crust subsets**, not full languages: C++ is lowered to C by `tools/cpprust.py`, Rust by Crust (`shivyc/crust.py`), RPython by `tools/py2c.py`, and gcc compiles that C (never g++, rustc or CPython). What those front ends do not accept, Build says, at the script's line. Each script becomes an object file linked into `libstride2d.so` beside the engine, behind a small generated C# script of the same name and capacity (`tools/script_native.py`), so the scene's calls reach it like any other script. A script reaches the engine through node handles (an int), not the C# engine's `Component` and `Node` objects:
+
+| | C++ | Rust | RPython |
+|---|---|---|---|
+| the node | `int node;` | `node: i32` | `self.node: int = 0` in `__init__` |
+| engine calls | `SetPos(node, x, y)`, `NodeX(node)` ... | `set_pos(..)`, `node_x(..)` ... | `set_pos(..)`, `node_x(..)` ... |
+| input | `KeyDown(65)`, `MouseDown(0)`, `MouseWorldX()` | `key_down(65)`, `mouse_down(0)`, `mouse_world_x()` | `key_down(65)`, ... |
+| collision, trigger | `void OnTriggerEnter2D(int other)` | `fn on_trigger_enter_2d(&mut self, other: i32)` | `def on_trigger_enter_2d(self, other: int)` |
+| where a collision was | `HitX()`, `HitY()`, `HitNX()`, `HitNY()`, `HitImpulse()` | `hit_x()` ... | `hit_x()` ... |
+
+The engine calls are the `public static` functions of `src/engine/Engine.cs` (the same ones `p2d_*` exports), without the host's own (`Init`, `Step`, `Draw`, `Camera`, ...). The scripts' instances live in a pool of the script's capacity; a recycled one starts again from zero (RPython: `__init__` runs when the script is attached and again after a recycle; annotate its fields, `self.x: float = 0.0`, which is what gives them C types).
+
+Build (F5) builds all four languages. `tools/script_langs.py` first checks the other languages' files (the same step runs under `python3 tools/engine_so.py --scripts DIR`, which tells languages apart by the file's extension): a capacity that is not an integer literal of at least 1, a marker with no class after it, a script without its `node` field, a callback that would never be called (not `void`, not public, no `&mut self` or `self`, a lifecycle callback with parameters, a collision callback without `other`), or two scripts of one name (across all languages: sprites and the game attach by name) is an error at its line. What the front ends say (`cpprust:`, Crust's, py2c's) is read into the same problems list, colour codes and all; an error the C compiler gives on the C a front end wrote has no place, because that line is not the script's.
 
 ## Project JSON
-`{"format":"stride2d-project","version":1, palette, sprites, tiles, levels}`. Sprite frames are rows of palette key letters; `.` is index 0 (transparent).
+`{"format":"stride2d-project","version":1, palette, sprites, tiles, levels}`. Scripts are `"scripts": [{"name": "Spinner", "text": "...", "language": "cpp"}]` (`language` is `csharp` when left out, and is one of `csharp`, `cpp`, `rust`, `rpython`); a project with a script in a language other than C# is written as `"version":2`, so that an editor without languages refuses it instead of reading a Rust script as C#. Sprite frames are rows of palette key letters; `.` is index 0 (transparent).
 Recolouring an index recolours every pixel that uses it, so scripts animate by changing one palette entry.
 
 ## Sprite ASCII

@@ -18,6 +18,7 @@ It started as a fork of [Stride](https://github.com/stride3d/stride). The engine
 | **Shattering sprites** | A port of [Unity-2D-Destruction](https://github.com/crustos/Unity-2D-Destruction): break a box or convex polygon into Voronoi or Delaunay fragments, each a rigidbody with a polygon collider and a textured mesh; explosion forces |
 | **Rendering** | A C renderer (`src/native/gfx2d`) that draws the sprite and mesh batches: desktop OpenGL ES 3 (loaded at run time through EGL), a deterministic CPU rasteriser as the fallback, and WebGL2 and WebGPU in a browser. See [Rendering](#rendering) |
 | **Draw data** | Sprite instances, mesh triangle lists and the terrain's dirty rectangle, ready for a renderer |
+| **Scripts in C++, Rust and RPython** | The editor's scripts can also be written in the subsets [Crust](https://github.com/crustos/crust) lowers to C (C++ via `cpprust`, Rust via `crust`, RPython via `py2c`): they are compiled by the C compiler and linked into the engine library next to the C# ones, with no g++, rustc or CPython. `samples/SlimeJumpRust` is a whole game made this way (climbing, blaster, lasso, turrets, crumbly platforms, checkpoints and a bot); see its README and `EDITOR.md` |
 | **Scripts outside the subset** | Optional: a script that uses lambdas, `try/catch` or LINQ runs on [DotNetAnywhere](https://github.com/crustos/DotNetAnywhere), while the engine stays native |
 
 ## What does not exist yet

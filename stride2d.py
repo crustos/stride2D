@@ -4,6 +4,7 @@
     python3 stride2d.py [project.json]        open the editor (a demo project if none is given)
     python3 stride2d.py --demo cave           open samples/SlimeCave: a lit cave (Effects and Lights windows show how it is made); tools/cave_gif.py plays it into a GIF
     python3 stride2d.py --demo slime          open samples/SlimeJumpDestruct as a project and play it in the viewport (the dirt wall is dug, crates burst)
+    python3 stride2d.py --demo slime-rust     open SlimeJump with its game logic in Rust scripts (samples/SlimeJumpRust): press F5 to build them, then play (arrows or A/D, space, mouse: blaster and lasso, T: the bot)
     python3 stride2d.py --viewport [...]      also open the engine's window on the first level
     python3 stride2d.py --export-ascii DIR project.json     no GUI: write the project's sprites and levels as ASCII art / emoji text into DIR
     python3 stride2d.py --import-ascii OUT.json [--sprites A.txt ...] [--levels B.txt ...]    no GUI: build a project from ASCII art and emoji levels
@@ -16,10 +17,11 @@ The editor is several floating windows (project / palette / sprite editor / leve
 
     python3 tools/engine_so.py            -> /tmp/libstride2d.so   (set STRIDE2D_LIB to use another path)
 
-Scripts: the Scripts window is a small code editor for the project's C# (saved in the project file). Mark a class [Script, MaxInstances(N)] with `public Component Self;` and
-callbacks (Update, OnCollisionBegin2D ...), tick it for a sprite (it runs on every tile showing that sprite) or for the game (once per play), and press F5: the scripts are
-translated to C with the engine (needs the .NET SDK, about a minute), a new engine library is linked, the viewport's window closes and opens again on it. Errors come back with
-their line. Scripts read keys and the mouse with Input2D (src/engine/Input2D.cs). Only the C# subset builds (tools/ccsharp/README.md).
+Scripts: the Scripts window is a small code editor for the project's scripts (C#, C++, Rust or RPython, picked next to New script; saved in the project file). Mark a class
+[Script, MaxInstances(N)] with `public Component Self;` and callbacks (Update, OnCollisionBegin2D ...), tick it for a sprite (it runs on every tile showing that sprite) or for the
+game (once per play), and press F5: the scripts are translated to C with the engine (needs the .NET SDK, about a minute), a new engine library is linked, the viewport's window
+closes and opens again on it. Errors come back with their line. Scripts read keys and the mouse with Input2D (src/engine/Input2D.cs). Only the C# subset builds
+(tools/ccsharp/README.md); the C++, Rust and RPython scripts are lowered to C by Crust's front ends and linked in too (tools/script_native.py; EDITOR.md, Scripts).
 
 Without it everything but the viewport works. Sprites are indexed-palette pixel art (a letter per colour); levels are grids of emoji tiles, which an
 exported level shows as text. See stride2d_editor/asciiart.py for both formats.
@@ -43,6 +45,9 @@ def load_project(path, demo=None):
     if demo == "cave":
         from stride2d_editor.cave_demo import make_cave_project
         return make_cave_project()
+    if demo == "slime-rust":
+        from stride2d_editor.slime_rust import make_slime_rust_project
+        return make_slime_rust_project()
     return make_demo_project()
 
 
@@ -165,7 +170,7 @@ def cmd_gui(project_path, open_viewport, quit_after=None, demo=None):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("project", nargs="?", help="a project .json (default: the demo project)")
-    ap.add_argument("--demo", choices=["coins", "slime", "cave"], help="open a built-in project: 'slime' is samples/SlimeJumpDestruct, played in the viewport; 'cave' is samples/SlimeCave, a dark cave with lights and effects")
+    ap.add_argument("--demo", choices=["coins", "slime", "cave", "slime-rust"], help="open a built-in project: 'slime' is samples/SlimeJumpDestruct, played in the viewport; 'slime-rust' is SlimeJump in Rust (press F5 to build it); 'cave' is samples/SlimeCave, a dark cave with lights and effects")
     ap.add_argument("--viewport", action="store_true", help="also open the engine's window")
     ap.add_argument("--export-ascii", metavar="DIR", help="no GUI: write sprites/ and levels/ text files of the project into DIR")
     ap.add_argument("--import-ascii", metavar="OUT.json", help="no GUI: build a project from --sprites and --levels text files")
