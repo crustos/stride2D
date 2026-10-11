@@ -1,6 +1,9 @@
 """Tests of the model and the text formats (no Qt, no engine):  python3 -m unittest stride2d_editor.test_core   (or: python3 stride2d.py --selftest)"""
+import importlib.util
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -10,7 +13,8 @@ from .fxdefs import BY_ID, EFFECTS, PARAM_FLOATS
 from .asciiart import (emoji_for_name, export_level, export_levels, export_sprite, export_sprites, import_levels, import_sprites, level_from_text,
                        level_to_text, natural_name, parse_level_text, scan_sprite_text, split_graphemes)
 from .demo import make_demo_project
-from .model import Level, Palette, Project, ProjectError, Sprite, TileDef, parse_color
+from . import languages, scriptbuild
+from .model import Level, Palette, Project, ProjectError, ScriptFile, Sprite, TileDef, parse_color
 
 
 def snapshot(project):
@@ -1403,3 +1407,448 @@ class UnityImportKeepsStrideLevels(UnityFiles):
         self.assertEqual(q.level("New").cells, new.cells)
         self.assertEqual(len(q.levels[0].lights), 1)
         self.assertEqual(q.levels[0].effects[0]["effect"], "tint")
+
+
+class ScriptLanguages(unittest.TestCase):
+    """A script is a file in one language (languages.py): its template, which classes in it are scripts, what the project file says, and what the build does with it."""
+
+    def test_the_languages_and_their_files(self):
+        self.assertEqual(list(languages.LANGUAGES), ["csharp", "cpp", "rust", "rpython"])
+        self.assertEqual([l.ext for l in languages.LANGUAGES.values()], [".cs", ".cpp", ".rs", ".py"])
+        self.assertEqual([l.name for l in languages.LANGUAGES.values()], ["C#", "C++", "Rust", "RPython"])
+        self.assertEqual(languages.DEFAULT, "csharp")
+        self.assertEqual(languages.by_extension("Spinner.RS").id, "rust")
+        self.assertIsNone(languages.by_extension("Spinner.txt"))
+        with self.assertRaises(languages.UnknownLanguage) as e:
+            languages.get("cobol")
+        self.assertIn("csharp, cpp, rust, rpython", str(e.exception))
+        with self.assertRaises(ValueError):                                          # (UnknownLanguage is a ValueError)
+            ScriptFile("A", "", "cobol")
+
+    def test_each_template_is_a_script_with_its_class_and_only_it(self):
+        for lang in languages.LANGUAGES.values():
+            text = lang.new_text("Spinner")
+            self.assertEqual(lang.classes(text), ["Spinner"], lang.id)
+            self.assertEqual(ScriptFile("Spinner", text, lang.id).classes(), ["Spinner"], lang.id)
+            self.assertNotIn("%(name)s", text, lang.id)
+
+    def test_a_class_is_a_script_only_with_the_marker_and_not_inside_a_comment(self):
+        plain = {"csharp": "class A { }", "cpp": "class A { };", "rust": "struct A { node: i32 }", "rpython": "class A(object):\n    pass\n"}
+        commented = {"csharp": "// [Script, MaxInstances(4)]\nclass A { }",
+                     "cpp": "// STRIDE_SCRIPT(4)\nclass A { };\n/* STRIDE_SCRIPT(4)\nclass B { }; */",
+                     "rust": "// #[script(max_instances = 4)]\nstruct A { node: i32 }\n/* #[script]\nstruct B {} */",
+                     "rpython": "# @script(max_instances=4)\nclass A(object):\n    pass\n"}
+        for lang in languages.LANGUAGES.values():
+            self.assertEqual(lang.classes(plain[lang.id]), [], lang.id)
+            self.assertEqual(lang.classes(commented[lang.id]), [], lang.id)
+
+    def test_markers_in_the_shapes_people_write(self):
+        cpp = languages.get("cpp")
+        self.assertEqual(cpp.classes("STRIDE_SCRIPT(4) struct S { int node; };\nSTRIDE_SCRIPT( 8 )\nclass T {\n    int node;\n};\nclass Plain { };"), ["S", "T"])
+        rust = languages.get("rust")
+        self.assertEqual(rust.classes("#[derive(Clone)]\n#[script(max_instances = 4)]\n#[allow(dead_code)]\npub struct S { node: i32 }\n"
+                                      "#[script]\nstruct T { node: i32 }\nstruct Plain { node: i32 }"), ["S", "T"])
+        rpy = languages.get("rpython")
+        self.assertEqual(rpy.classes("@script(max_instances=4)\nclass S(object):\n    pass\n\n@script\n@other(1)\nclass T(S):\n    pass\n\nclass Plain(object):\n    pass\n"),
+                         ["S", "T"])
+        cs = languages.get("csharp")
+        self.assertEqual(cs.classes("[Script, MaxInstances(2)]\npublic sealed class S { }\n[Script]\n[Other]\nclass T { }\nclass Plain { }"), ["S", "T"])
+
+    def test_the_project_file_says_the_language_only_when_it_is_not_csharp(self):
+        p = Project("langs")
+        for lang in languages.LANGUAGES.values():
+            p.scripts.append(ScriptFile("S_" + lang.id, lang.new_text("S_" + lang.id), lang.id))
+        data = p.to_json()
+        self.assertEqual([item.get("language") for item in data["scripts"]], [None, "cpp", "rust", "rpython"])
+        self.assertEqual(data["version"], 2)
+        back = Project.from_json(json.loads(json.dumps(data)))
+        self.assertEqual([(f.name, f.language, f.text) for f in back.scripts], [(f.name, f.language, f.text) for f in p.scripts])
+        self.assertEqual(back.script_classes(), {"S_csharp": "S_csharp", "S_cpp": "S_cpp", "S_rust": "S_rust", "S_rpython": "S_rpython"})
+
+    def test_a_project_of_csharp_scripts_is_still_version_1_and_an_old_file_loads_as_csharp(self):
+        p = Project("old")
+        p.scripts.append(ScriptFile("A", languages.CSHARP.new_text("A")))
+        data = p.to_json()
+        self.assertEqual(data["version"], 1)
+        self.assertEqual(data["scripts"], [{"name": "A", "text": languages.CSHARP.new_text("A")}])      # no "language" key: what an editor without languages wrote
+        back = Project.from_json(data)
+        self.assertEqual(back.scripts[0].language, "csharp")
+        self.assertEqual(Project().to_json()["version"], 1)
+
+    def test_an_unknown_language_is_refused_with_its_place(self):
+        data = Project("x").to_json()
+        data["version"] = 2
+        data["scripts"] = [{"name": "A", "text": ""}, {"name": "B", "text": "", "language": "cobol"}]
+        with self.assertRaises(ProjectError) as e:
+            Project.from_json(data)
+        self.assertIn("scripts[1]", str(e.exception))
+        self.assertIn("cobol", str(e.exception))
+        data["version"] = 3
+        with self.assertRaises(ProjectError):
+            Project.from_json(data)
+
+    def test_the_build_writes_each_script_under_its_languages_extension(self):
+        p = Project("mixed")
+        for lang in languages.LANGUAGES.values():
+            p.scripts.append(ScriptFile("S_" + lang.id, lang.new_text("S_" + lang.id), lang.id))
+        with tempfile.TemporaryDirectory() as d:
+            b = scriptbuild.Builder(d)
+            b.prepare(p)
+            self.assertEqual(sorted(os.listdir(os.path.join(d, "src"))), ["S_cpp.cpp", "S_csharp.cs", "S_rpython.py", "S_rust.rs"])
+            with open(os.path.join(d, "src", "S_rust.rs"), encoding="utf-8") as f:
+                self.assertEqual(f.read(), languages.get("rust").new_text("S_rust"))
+
+    def test_what_the_tool_says_is_what_the_build_result_holds_in_the_order_it_said_it(self):
+        p = Project("mixed")
+        p.scripts.append(ScriptFile("S_cpp", languages.get("cpp").new_text("S_cpp"), "cpp"))
+        said = "S_cpp.cpp(8,1): warning STRIDE0001: C++ scripts are not built yet: S_cpp will not run\n"
+        with tempfile.TemporaryDirectory() as d:
+            b = scriptbuild.Builder(d)
+            cmd, lib = b.prepare(p)
+            open(lib, "w").close()
+            with open(lib + ".scripts.json", "w") as f:
+                json.dump([{"id": 0, "name": "S_csharp", "language": "csharp"}], f)
+            r = b.finish(lib, 0, said)                                                  # a build that worked: the library, its numbers, the warning
+            self.assertTrue(r.ok)
+            self.assertEqual(r.scripts, {"S_csharp": 0})
+            self.assertEqual([(d_.script, d_.line, d_.severity, d_.code) for d_ in r.diagnostics], [("S_cpp", 8, "warning", "STRIDE0001")])
+            cmd, lib2 = b.prepare(p)                                                    # one that failed: the error and the warning, as said
+            r = b.finish(lib2, 1, said + "S_csharp.cs(3,5): error CS1002: ; expected\n")
+            self.assertFalse(r.ok)
+            self.assertEqual([(d_.severity, d_.script) for d_ in r.diagnostics], [("warning", "S_cpp"), ("error", "S_csharp")])
+            cmd, lib3 = b.prepare(p)                                                    # a failure that said no error still says that it failed, first
+            r = b.finish(lib3, 1, said)
+            self.assertEqual([d_.severity for d_ in r.diagnostics], ["error", "warning"])
+            self.assertIn("the build failed", r.diagnostics[0].message)
+            cmd, lib4 = b.prepare(p)                                                    # and one that said nothing at all
+            r = b.finish(lib4, 1, "")
+            self.assertEqual([d_.severity for d_ in r.diagnostics], ["error"])
+
+    def test_a_project_of_csharp_only_writes_just_its_files(self):
+        p = Project("cs")
+        p.scripts.append(ScriptFile("A", languages.CSHARP.new_text("A")))
+        with tempfile.TemporaryDirectory() as d:
+            scriptbuild.Builder(d).prepare(p)
+            self.assertEqual(os.listdir(os.path.join(d, "src")), ["A.cs"])
+
+
+# What each front end really says, captured from tools/cpprust.py, shivyc (Rust) and tools/py2c.py on scripts with a mistake in them (paths as the build gives them: the file name alone).
+CPPRUST_PLACED = "cpprust: syn.cpp:4: cannot parse member 'void f(' in class A\n"
+CPPRUST_PLACE_LESS = "cpprust: class C: `virtual` inheritance is not in the C++ subset. Use a base with no data members (any number of those may be inherited).\n"
+CRUST_PARSER = "\x1b[1mshivyc: \x1b[31merror:\x1b[0m crust: syn.rs: line 5: unexpected ';' in expression\n"
+SHIVYC_ON_RUST = "\x1b[1mundef.rs:5:16: \x1b[31merror:\x1b[0m use of undeclared identifier 'nothere'\n      self->x = (nothere + 1);\n  \x1b[33m               -------\x1b[0m\n"
+PY2C_SYNTAX = "  runtime -> pyout/shivyc_rt.{h,c}\n  SYNTAX ERROR in syn.py: invalid syntax (syn.py, line 6)\nTranspiled 0/1 files into pyout\n"
+GCC_ON_GENERATED = ("undef.c: In function 'D_f':\nundef.c:5:38: error: 'nothere' undeclared (first use in this function)\n"
+                    "    5 | static void D_f(D *this) { this->x = nothere + 1; }\nundef.c:5:38: note: each undeclared identifier is reported only once for each function it appears in\n")
+
+
+class ScriptDiagnostics(unittest.TestCase):
+    """Each language's tool says its errors its own way; the problems list reads them all (scriptbuild.parse_diagnostics)."""
+
+    def parsed(self, text):
+        return [(d.script, d.line, d.col, d.severity, d.code, d.message) for d in scriptbuild.parse_diagnostics(text)]
+
+    def test_cpp(self):
+        self.assertEqual(self.parsed(CPPRUST_PLACED), [("syn", 4, 1, "error", "", "cannot parse member 'void f(' in class A")])
+        (d,) = scriptbuild.parse_diagnostics(CPPRUST_PLACE_LESS)                       # (it names no file and line: an error with no place, not a lost one)
+        self.assertEqual((d.script, d.line, d.severity), ("", 0, "error"))
+        self.assertIn("`virtual` inheritance", d.message)
+
+    def test_rust_in_both_of_the_shapes_shivyc_says_it_and_without_its_colour_codes(self):
+        self.assertEqual(self.parsed(CRUST_PARSER), [("syn", 5, 1, "error", "", "unexpected ';' in expression")])
+        self.assertEqual(self.parsed(SHIVYC_ON_RUST), [("undef", 5, 1, "error", "", "use of undeclared identifier 'nothere'")])     # (the source and the ^^^^ it shows are not diagnostics)
+
+    def test_rpython(self):
+        self.assertEqual(self.parsed(PY2C_SYNTAX), [("syn", 6, 1, "error", "", "invalid syntax")])
+
+    def test_the_c_compiler_on_generated_c_has_no_place_because_that_line_is_not_the_scripts(self):
+        (d,) = scriptbuild.parse_diagnostics(GCC_ON_GENERATED)
+        self.assertEqual((d.script, d.line, d.severity), ("", 0, "error"))
+        self.assertIn("'nothere' undeclared", d.message)
+        self.assertIn("generated C, undef.c line 5", d.message)                        # (where it was said, so that it can be looked for)
+
+    def test_the_tools_own_lines_and_the_csharp_translators_are_as_they_were(self):
+        self.assertEqual(self.parsed("Other_cpp.cpp(8,1): warning STRIDE0001: C++ scripts are not built yet: Other_cpp will not run\n"),
+                         [("Other_cpp", 8, 1, "warning", "STRIDE0001", "C++ scripts are not built yet: Other_cpp will not run")])
+        self.assertEqual(self.parsed("NoCap.rs(2,1): error GEN0001: script NoCap needs #[script(max_instances = N)] with N an integer literal\n"),
+                         [("NoCap", 2, 1, "error", "GEN0001", "script NoCap needs #[script(max_instances = N)] with N an integer literal")])
+        self.assertEqual(self.parsed("Teleporter.cs(10,9): error CS1002: ; expected\n"), [("Teleporter", 10, 9, "error", "CS1002", "; expected")])
+        self.assertEqual(self.parsed("$ python3 tools/ccsharp/ccs2c.py x\n== translating\n"), [])                         # (not diagnostics)
+
+    def test_a_whole_build_output_is_read_in_the_order_it_was_said(self):
+        out = ("Other_cpp.cpp(8,1): warning STRIDE0001: C++ scripts are not built yet: Other_cpp will not run\n== translating src/engine/Engine.cs\n" + CPPRUST_PLACED + CRUST_PARSER
+               + PY2C_SYNTAX + GCC_ON_GENERATED)
+        self.assertEqual([(d.severity, d.script, d.line) for d in scriptbuild.parse_diagnostics(out)],
+                         [("warning", "Other_cpp", 8), ("error", "syn", 4), ("error", "syn", 5), ("error", "syn", 6), ("error", "", 0)])
+
+    def test_a_diagnostic_reads_well_with_and_without_a_code_and_a_place(self):
+        d = scriptbuild.Diagnostic
+        self.assertEqual(str(d("A", 4, 1, "error", "", "bad")), "A:4: error: bad")
+        self.assertEqual(str(d("A", 4, 1, "warning", "STRIDE0001", "note")), "A:4: warning STRIDE0001: note")
+        self.assertEqual(str(d("A", 0, 0, "error", "GEN0001", "no line")), "A: error GEN0001: no line")
+        self.assertEqual(str(d("", 0, 0, "error", "", "no place")), "error: no place")
+
+
+def load_script_langs():
+    """tools/script_langs.py (tools is not a package)."""
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools", "script_langs.py")
+    spec = importlib.util.spec_from_file_location("script_langs", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+SL = load_script_langs()
+
+
+def load_script_native():
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools", "script_native.py")
+    spec = importlib.util.spec_from_file_location("script_native", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+SN = load_script_native()
+TOOL = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools", "engine_so.py")
+
+
+class ScriptGlue(unittest.TestCase):
+    """What the build generates for the scripts that are not C# (tools/script_native.py): the C# proxy, the bindings, the headers and the glue, as text (a real build runs in test_gui)."""
+    API = [("int", "NewNode", []), ("void", "SetPos", [("int", "node"), ("float", "x"), ("float", "y")]), ("float", "NodeX", [("int", "node")]),
+           ("int", "KeyDown", [("int", "key")]), ("void", "Step", [("float", "dt")]), ("int", "Init", [("int", "w"), ("int", "h")])]
+    SCRIPT = {"name": "Mover", "language": "cpp", "capacity": 8, "callbacks": ["Update", "OnCollisionBegin2D", "OnTriggerEnter2D"], "line": 3, "where": "/x/Mover.cpp:3"}
+
+    def test_the_proxy_is_a_csharp_script_with_the_capacity_and_a_call_per_callback(self):
+        cs = SN.proxy_cs(self.SCRIPT)
+        self.assertIn("[Script, MaxInstances(8)]\nclass Mover", cs)
+        self.assertIn("public Component Self;", cs)
+        self.assertIn("public void Update() { P2DNative_Mover.Update(Self.Slot, Self.Node.Index); }", cs)
+        self.assertIn("public void OnCollisionBegin2D(Collision2D hit)", cs)
+        self.assertIn("P2DNative_Mover.OnCollisionBegin2D(Self.Slot, Self.Node.Index, other, hit.X, hit.Y, hit.NX, hit.NY, hit.Impulse);", cs)
+        self.assertIn("public void OnTriggerEnter2D(Collider2D other)", cs)
+        self.assertIn("public void Reset() { P2DNative_Mover.Reset(Self.Slot); }", cs)               # (a recycled slot starts again)
+        self.assertNotIn("FixedUpdate", cs)                                                          # (only the script's own callbacks, so the scene does not call what is not there)
+        self.assertTrue(gen_scripts_accepts(cs))
+
+    def test_bindings_and_prototypes_agree(self):
+        b, h = SN.bindings_cs([self.SCRIPT]), SN.glue_prototypes([self.SCRIPT])
+        for proto in ("void p2dn_Mover_Reset(int slot);", "void p2dn_Mover_Update(int slot, int node);",
+                      "void p2dn_Mover_OnCollisionBegin2D(int slot, int node, int other, float x, float y, float nx, float ny, float impulse);",
+                      "void p2dn_Mover_OnTriggerEnter2D(int slot, int node, int other);"):
+            self.assertIn(proto, h)
+        self.assertIn('[Crust.Cpp("p2dn_Mover_Update({0}, {1})")] public static extern void Update(int slot, int node);', b)
+        self.assertIn('[Crust.Cpp("p2dn_Mover_OnTriggerEnter2D({0}, {1}, {2})")] public static extern void OnTriggerEnter2D(int slot, int node, int other);', b)
+        self.assertIn('[Crust.CppInclude("\\"p2d_native.h\\"")]', b)
+
+    def test_a_script_is_given_the_engines_calls_and_not_the_hosts(self):
+        h = SN.engine_header(self.API)
+        self.assertIn("static inline void SetPos(int node, float x, float y) { p2d_set_pos(node, x, y); }", h)
+        self.assertIn("static inline float NodeX(int node) { return p2d_node_x(node); }", h)
+        self.assertIn("#define STRIDE_SCRIPT(n)", h)
+        self.assertIn("HitNY()", h)
+        rs, py = SN.rust_prelude(self.API), SN.rpython_prelude(self.API)
+        self.assertIn("fn set_pos(node: i32, x: f32, y: f32) { p2d_set_pos(node, x, y); }", rs)
+        self.assertIn("fn node_x(node: i32) -> f32 { return p2d_node_x(node); }", rs)
+        self.assertIn("def set_pos(node: int, x: float, y: float):\n    _p2d.p2d_set_pos(node, x, y)", py)
+        self.assertIn("_p2d.p2d_node_x.restype = ctypes.c_float", py)
+        for text in (h, rs, py):
+            for host in ("Step", "Init", "p2d_step", "p2d_init", "def step", "fn step", "fn init"):
+                self.assertNotIn(host, text)                                                          # (the frame and the process are the host's)
+
+    def test_the_glue_keeps_the_instances_in_a_pool_and_sets_the_node_before_each_call(self):
+        g = SN.c_glue(self.SCRIPT, lambda cb, inst, args: "%s.%s(%s)" % (inst, cb, ", ".join(args)))
+        self.assertIn("static Mover p2d_pool_Mover[8];", g)
+        self.assertIn("void p2dn_Mover_Reset(int slot) { p2d_pool_Mover[slot] = p2d_zero_Mover; }", g)
+        self.assertIn("void p2dn_Mover_Update(int slot, int node) { p2d_pool_Mover[slot].node = node; p2d_pool_Mover[slot].Update(); }", g)
+        self.assertIn("p2d_hit[3] = ny;", g)
+        self.assertIn("p2d_pool_Mover[slot].OnTriggerEnter2D(other);", g)
+        self.assertNotIn("p2d_hit[0] = x;", g.split("p2dn_Mover_OnTriggerEnter2D")[1])              # (only a collision has a point)
+        g = SN.c_glue(self.SCRIPT, lambda cb, inst, args: "X", init="Mover___init__")               # (RPython: __init__ before the first call, and again after a reset)
+        self.assertIn("if (!p2d_live_Mover[slot]) { Mover___init__(&p2d_pool_Mover[slot]); p2d_live_Mover[slot] = 1; }", g)
+        self.assertIn("p2d_live_Mover[slot] = 0;", g)
+        self.assertEqual(SN.glue_names(self.SCRIPT), ["p2dn_Mover_Reset", "p2dn_Mover_Update", "p2dn_Mover_OnCollisionBegin2D", "p2dn_Mover_OnTriggerEnter2D"])
+
+    def test_the_marker_lines_of_an_rpython_script_are_commented_out_where_they_stand(self):
+        text = "from stride2d import script\n\n\n@script(max_instances=4)\nclass A:\n    pass\n"
+        out = SN._MARKER_LINES.sub(lambda m: m.group(1) + "# " + m.group(2), text)
+        self.assertEqual(out.split("\n"), ["# from stride2d import script", "", "", "# @script(max_instances=4)", "class A:", "    pass", ""])
+
+
+def gen_scripts_accepts(cs_text):
+    """True if the C# script generator (tools/ccsharp/gen_scripts.py) accepts `cs_text` as a script file."""
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools", "ccsharp"))
+    import gen_scripts
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "P.cs")
+        with open(path, "w") as f:
+            f.write(cs_text)
+        _ns, scripts = gen_scripts.scan_file(path)
+    return [(sc["name"], sc["capacity"], [c[0] for c in sc["callbacks"]], sc["reset"]) for sc in scripts] == [("Mover", 8, ["Update", "OnCollisionBegin2D", "OnTriggerEnter2D"], True)]
+
+
+class ScriptScan(unittest.TestCase):
+    """What the build reads from C++, Rust and RPython scripts (tools/script_langs.py): the marker, the capacity, the callbacks, and the mistakes that would make a script silently never run."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+
+    def write(self, name, text):
+        path = os.path.join(self.dir.name, name)
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(text)
+        return path
+
+    def scan(self, name, text):
+        return SL.scan_file(self.write(name, text))
+
+    def refused(self, name, text, line, *words):
+        with self.assertRaises(SL.GenError) as e:
+            self.scan(name, text)
+        msg = str(e.exception)
+        self.assertTrue(msg.startswith("%s:%d:" % (os.path.join(self.dir.name, name), line)), msg)
+        for w in words:
+            self.assertIn(w, msg)
+
+    def test_each_template_is_one_script_of_16_with_an_update_at_its_markers_line(self):
+        for lang in languages.LANGUAGES.values():
+            if lang.id == "csharp":
+                continue
+            text = lang.new_text("Spinner")
+            (sc,) = self.scan("Spinner" + lang.ext, text)
+            marker = {"cpp": "STRIDE_SCRIPT(16)", "rust": "#[script(max_instances = 16)]", "rpython": "@script(max_instances=16)"}[lang.id]
+            self.assertEqual((sc["name"], sc["language"], sc["capacity"], sc["callbacks"]), ("Spinner", lang.id, 16, ["Update"]), lang.id)
+            self.assertEqual(text.split("\n")[sc["line"] - 1], marker, lang.id)
+
+    def test_the_editor_and_the_build_agree_on_which_classes_are_scripts(self):
+        samples = {"cpp": "STRIDE_SCRIPT(4) struct S { int node; };\nSTRIDE_SCRIPT( 8 )\nclass T {\n    int node;\n};\nclass Plain { };\n// STRIDE_SCRIPT(1)\nclass Hidden { };\n#define STRIDE_SCRIPT(n)\n",
+                   "rust": "#[derive(Clone)]\n#[script(max_instances = 4)]\n#[allow(dead_code)]\npub struct S { node: i32 }\n#[script(max_instances = 2)]\nstruct T { node: i32 }\n"
+                           "struct Plain { node: i32 }\n// #[script(max_instances = 1)]\nstruct Hidden { }\n",
+                   "rpython": "@script(max_instances=4)\nclass S(object):\n    def __init__(self):\n        self.node: int = 0\n\n@script(2)\n@other(1)\nclass T(S):\n    def __init__(self):\n        self.node: int = 0\n\nclass Plain(object):\n    pass\n"
+                              "# @script(max_instances=1)\nclass Hidden(object):\n    pass\n"}
+        for lang_id, text in samples.items():
+            lang = languages.get(lang_id)
+            built = [sc["name"] for sc in self.scan("Many" + lang.ext, text)]
+            self.assertEqual(built, ["S", "T"], lang_id)
+            self.assertEqual(lang.classes(text), built, lang_id)
+        for lang in languages.LANGUAGES.values():                                       # and on the templates, which is what a new script is
+            if lang.id != "csharp":
+                self.assertEqual(lang.classes(lang.new_text("Z")), [sc["name"] for sc in self.scan("Z" + lang.ext, lang.new_text("Z"))])
+
+    def test_every_callback_is_found_in_each_languages_own_spelling(self):
+        cpp = "".join("    void %s(%s) { }\n" % (c, "" if c in SL.LIFECYCLE else "int other") for c in SL.CALLBACKS)
+        rust = "".join("    fn %s(&mut self%s) { }\n" % (SL.SNAKE[c], "" if c in SL.LIFECYCLE else ", other: i32") for c in SL.CALLBACKS)
+        rpy = "".join("    def %s(self%s):\n        pass\n" % (SL.SNAKE[c], "" if c in SL.LIFECYCLE else ", other: int") for c in SL.CALLBACKS)
+        (a,) = self.scan("A.cpp", "STRIDE_SCRIPT(1)\nclass A {\npublic:\n    int node;\n%s};\n" % cpp)
+        (b,) = self.scan("B.rs", "#[script(max_instances = 1)]\nstruct B { node: i32 }\nimpl B {\n%s}\n" % rust)
+        (c,) = self.scan("C.py", "@script(max_instances=1)\nclass C(object):\n    def __init__(self):\n        self.node: int = 0\n%s" % rpy)
+        for sc in (a, b, c):
+            self.assertEqual(sc["callbacks"], SL.CALLBACKS, sc["language"])
+        for lang_id in ("cpp", "rust", "rpython"):                                      # the templates name them all, in the same spelling
+            text = languages.get(lang_id).new_text("Z")
+            for cb in SL.CALLBACKS:
+                self.assertIn(SL.spelling(lang_id, cb), text, (lang_id, cb))
+
+    def test_a_callback_is_found_wherever_it_is_written_and_a_call_is_not_a_declaration(self):
+        (a,) = self.scan("A.cpp", "STRIDE_SCRIPT(4) class A { public: int node; void Start() { Update(); } void Update() { node = 1; } };\n")
+        self.assertEqual(a["callbacks"], ["Start", "Update"])
+        (b,) = self.scan("B.cpp", "STRIDE_SCRIPT(4) class B { public: int node; void Start() { Update(); } };\n")
+        self.assertEqual(b["callbacks"], ["Start"])                                     # (Update() is called, never declared)
+        (c,) = self.scan("C.rs", "#[script(max_instances = 4)] struct C { node: i32 }\nimpl C { fn start(&mut self) { fn update(x: i32) -> i32 { x } } }\n")
+        self.assertEqual(c["callbacks"], ["Start"])                                     # (a function inside a method is not the script's)
+        (d,) = self.scan("D.py", "@script(max_instances=4)\nclass D(object):\n    def __init__(self):\n        self.node: int = 0\n    def start(self):\n        def update(x):\n            return x\n")
+        self.assertEqual(d["callbacks"], ["Start"])
+
+    def test_a_struct_script_is_public_and_a_class_script_must_say_so(self):
+        (a,) = self.scan("A.cpp", "STRIDE_SCRIPT(4) struct A { int node; void Update() { } };\n")
+        self.assertEqual(a["callbacks"], ["Update"])
+        self.refused("B.cpp", "STRIDE_SCRIPT(4)\nclass B {\n    int node;\n    void Update() { }\n};\n", 4, "Update is not public")
+
+    def test_a_script_that_is_wrong_is_an_error_at_its_line(self):
+        self.refused("A.cpp", "// a\nSTRIDE_SCRIPT()\nclass A { };\n", 2, "script A needs STRIDE_SCRIPT(N)", "integer literal")
+        self.refused("A.cpp", "STRIDE_SCRIPT(0)\nclass A { };\n", 1, "at least 1")
+        self.refused("A.cpp", "STRIDE_SCRIPT(MAX)\nclass A { };\n", 1, "integer literal")
+        self.refused("A.cpp", "int x;\nSTRIDE_SCRIPT(4)\nint y;\n", 2, "directly before a class")
+        self.refused("A.cpp", "STRIDE_SCRIPT(4)\nclass A {\npublic:\n    int Update() { return 1; }\n};\n", 4, "Update must return void")
+        self.refused("A.cpp", "STRIDE_SCRIPT(4)\nclass A {\npublic:\n    void Update(int dt) { }\n};\n", 4, "Update takes no parameters")
+        self.refused("A.rs", "#[script]\nstruct A { node: i32 }\n", 1, "script A needs #[script(max_instances = N)]")
+        self.refused("A.rs", "#[script(max_instances = four)]\nstruct A { node: i32 }\n", 1, "integer literal")
+        self.refused("A.rs", "#[script(max_instances = 4)]\nfn f() { }\n", 1, "directly before a struct")
+        self.refused("A.rs", "#[script(max_instances = 4)]\nstruct A { node: i32 }\nimpl A {\n    fn update(self) { }\n}\n", 4, "update must take `&mut self`")
+        self.refused("A.rs", "#[script(max_instances = 4)]\nstruct A { node: i32 }\nimpl A {\n    fn start(&mut self, x: i32) { }\n}\n", 4, "start takes no parameters")
+        self.refused("A.py", "@script\nclass A(object):\n    pass\n", 1, "script A needs @script(max_instances=N)")
+        self.refused("A.py", "@script(max_instances=0)\nclass A(object):\n    pass\n", 1, "at least 1")
+        self.refused("A.py", "@script(max_instances=4)\ndef f():\n    pass\n", 1, "directly before a class")
+        self.refused("A.py", "@script(max_instances=4)\nclass A(object):\n    x = 1\n\n    def update():\n        pass\n", 5, "update must take `self`")
+        self.refused("A.py", "@script(max_instances=4)\nclass A(object):\n    def start(self, x):\n        pass\n", 3, "start takes no parameters")
+
+    def test_comments_and_strings_do_not_make_scripts_or_hide_them(self):
+        (a,) = self.scan("A.py", "# @script(max_instances=9)\ns = \"\"\"\n@script(max_instances=8)\nclass Fake(object):\n\"\"\"\n@script(max_instances=3)\nclass A(object):\n    def __init__(self):\n        self.node: int = 0\n")
+        self.assertEqual((a["name"], a["capacity"], a["line"]), ("A", 3, 6))
+        (b,) = self.scan("B.rs", "/* #[script(max_instances = 9)]\nstruct Fake { } */\nlet s = \"#[script(max_instances = 8)] struct Fake\";\n#[script(max_instances = 3)]\nstruct B { node: i32 }\n")
+        self.assertEqual((b["name"], b["capacity"], b["line"]), ("B", 3, 4))
+        self.assertEqual(self.scan("C.cpp", "/* STRIDE_SCRIPT(9)\nclass Fake { }; */\nconst char *s = \"STRIDE_SCRIPT(8) class Fake {\";\n"), [])
+
+    def test_a_folder_gives_every_files_scripts_and_every_files_error_and_skips_csharp(self):
+        self.write("Good.cpp", languages.get("cpp").new_text("Good"))
+        self.write("Nothing.cs", "class Nothing { }")
+        self.write("Plain.py", "x = 1\n")                                              # (a .py that is no script: a module)
+        self.write("NoCap.rs", "#[script]\nstruct NoCap { node: i32 }\n")
+        self.write("NoSelf.py", "@script(max_instances=4)\nclass NoSelf(object):\n    def update():\n        pass\n")
+        scripts, errors = SL.scan_folder(self.dir.name)
+        self.assertEqual([s_["name"] for s_ in scripts], ["Good"])
+        self.assertEqual(errors, ["NoCap.rs(1,1): error GEN0001: script NoCap needs #[script(max_instances = N)] with N an integer literal",
+                                  "NoSelf.py(3,1): error GEN0001: script NoSelf: update must take `self`, or it would never be called"])
+        self.assertEqual([d_.script for d_ in scriptbuild.parse_diagnostics("\n".join(errors))], ["NoCap", "NoSelf"])      # (and the problems list reads them)
+
+    def test_scripts_of_a_language_that_is_not_built_are_warned_about_at_their_marker(self):
+        was = SL.BUILT
+        SL.BUILT = ("csharp",)                                                         # (every language is built now: a build that cannot build one is what is tested)
+        self.addCleanup(setattr, SL, "BUILT", was)
+        self.write("A.cpp", languages.get("cpp").new_text("A"))
+        self.write("B.rs", languages.get("rust").new_text("B"))
+        scripts, _ = SL.scan_folder(self.dir.name)
+        a_line = languages.get("cpp").new_text("A").split("\n").index("STRIDE_SCRIPT(16)") + 1
+        b_line = languages.get("rust").new_text("B").split("\n").index("#[script(max_instances = 16)]") + 1
+        self.assertEqual(SL.unbuilt_notes(scripts), ["A.cpp(%d,1): warning STRIDE0001: C++ scripts are not built yet: A will not run" % a_line,
+                                                     "B.rs(%d,1): warning STRIDE0001: Rust scripts are not built yet: B will not run" % b_line])
+
+    def test_every_language_is_built_and_each_has_a_builder(self):
+        self.assertEqual(SL.BUILT, ("csharp", "cpp", "rust", "rpython"))
+        self.assertEqual(sorted(SN.BUILDERS), ["cpp", "rpython", "rust"])
+        self.write("A.cpp", languages.get("cpp").new_text("A"))
+        scripts, _ = SL.scan_folder(self.dir.name)
+        self.assertEqual(SL.unbuilt_notes(scripts), [])
+
+    def test_a_script_needs_the_field_the_engine_sets(self):
+        self.refused("A.cpp", "STRIDE_SCRIPT(4)\nclass A {\npublic:\n    int x;\n};\n", 1, "needs a member `int node;`")
+        self.refused("A.rs", "#[script(max_instances = 4)]\nstruct A { x: i32 }\n", 1, "needs a field `node: i32`")
+        self.refused("A.py", "@script(max_instances=4)\nclass A:\n    def __init__(self):\n        self.node = 0\n", 1, "needs `self.node: int = 0`")
+
+    def test_a_collision_or_trigger_callback_takes_the_other_nodes_handle(self):
+        self.refused("A.cpp", "STRIDE_SCRIPT(4)\nclass A {\npublic:\n    int node;\n    void OnTriggerEnter2D(float other) { }\n};\n", 5, "takes the other node's handle")
+        self.refused("A.rs", "#[script(max_instances = 4)]\nstruct A { node: i32 }\nimpl A {\n    fn on_collision_begin_2d(&mut self) { }\n}\n", 4, "takes the other node's handle")
+        self.refused("A.py", "@script(max_instances=4)\nclass A:\n    def __init__(self):\n        self.node: int = 0\n    def on_trigger_enter_2d(self, other):\n        pass\n", 5, "takes the other node's handle")
+
+    def run_tool(self, folder):
+        """The tool on a folder of scripts, as far as it goes without translating anything."""
+        with tempfile.TemporaryDirectory() as work:
+            r = subprocess.run([sys.executable, TOOL, "--scripts", folder, "--work", os.path.join(work, "w"), "-o", os.path.join(work, "x.so")], capture_output=True, text=True)
+        return r.returncode, r.stdout + r.stderr
+
+    def test_the_tool_stops_on_a_script_that_is_wrong_with_all_the_errors_and_on_one_name_used_twice(self):
+        self.write("NoCap.rs", "#[script]\nstruct NoCap { node: i32 }\n")
+        self.write("NoSelf.py", "@script(max_instances=4)\nclass NoSelf(object):\n    def update():\n        pass\n")
+        code, out = self.run_tool(self.dir.name)
+        self.assertEqual(code, 1)
+        self.assertIn("NoCap.rs(1,1): error GEN0001", out)
+        self.assertIn("NoSelf.py(3,1): error GEN0001", out)                              # (both: one file's mistake does not hide another's)
+        other = tempfile.TemporaryDirectory()
+        self.addCleanup(other.cleanup)
+        for name, lang in (("Same.cpp", "cpp"), ("Other.rs", "rust")):
+            with open(os.path.join(other.name, name), "w") as f:
+                f.write(languages.get(lang).new_text("Same"))
+        code, out = self.run_tool(other.name)
+        self.assertEqual(code, 1)
+        self.assertIn("error GEN0002: two scripts are called Same (Other.rs and Same.cpp)", out)                    # (across languages)

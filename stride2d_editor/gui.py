@@ -16,7 +16,7 @@ import time
 from PyQt5 import QtCore, QtGui, QtWidgets
 from PyQt5.QtCore import Qt
 
-from . import asciiart, fileio, scriptbuild
+from . import asciiart, fileio, languages, scriptbuild
 from .engine import SAND_NAMES, Engine, EngineError, SandSettings, Viewport
 from .gui_fx import ParamForm
 from .gui_scripts import CodeEditor
@@ -260,17 +260,18 @@ class Studio(QtCore.QObject):
         self.edited("lights")
         return new
 
-    # ---- the project's scripts (C# files). Their text is edited in the code editor's own undo; attaching is by class name.
-    def add_script(self, name, text=None):
-        """A new script file (a template with a [Script] class of the same name unless `text` is given). Returns it."""
-        from .model import SCRIPT_TEMPLATE, ScriptFile
+    # ---- the project's scripts (files in C#, C++, Rust or RPython). Their text is edited in the code editor's own undo; attaching is by class name.
+    def add_script(self, name, text=None, language=languages.DEFAULT):
+        """A new script file in `language` (a template with a script class of the same name unless `text` is given). Returns it."""
+        from .model import ScriptFile
+        lang = languages.get(language)
         name = scriptbuild.file_name(name.strip() or "Script")
         taken = {f.name for f in self.project.scripts}
         base, n = name, 2
         while name in taken or name in self.project.script_classes():
             name = "%s%d" % (base, n)
             n += 1
-        f = ScriptFile(name, SCRIPT_TEMPLATE % {"name": name} if text is None else text)
+        f = ScriptFile(name, lang.new_text(name) if text is None else text, lang.id)
         self.project.scripts.append(f)
         self.edited("scripts")
         return f
@@ -1948,8 +1949,9 @@ class SandWindow(Floating):
 
 
 class ScriptsWindow(Floating):
-    """The code editor: the project's C# scripts, which sprites and the game attach by class name. Build (F5) translates the engine and the scripts to C, links a new engine
-    library and swaps it in: the graphics window closes and opens again on the new one. Errors come back with their line (the problems list; double-click to go there)."""
+    """The code editor: the project's scripts (C#, C++, Rust or RPython: the language picked next to New script), which sprites and the game attach by class name. Build (F5)
+    translates the engine and the scripts to C, links a new engine library and swaps it in: the graphics window closes and opens again on the new one. Errors come back
+    with their line (the problems list; double-click to go there). Only the C# scripts are built so far; the problems list says so for each of the others."""
 
     def __init__(self, studio):
         super().__init__(studio, "Scripts", (980, 640))
@@ -1963,6 +1965,11 @@ class ScriptsWindow(Floating):
         self._open = None                      # the name of the file in the editor
         lay = QtWidgets.QVBoxLayout(self)
         bar = QtWidgets.QHBoxLayout()
+        bar.addWidget(QtWidgets.QLabel("Language:"))
+        self.language_box = QtWidgets.QComboBox()                # (what New script makes)
+        for lang in languages.LANGUAGES.values():
+            self.language_box.addItem(lang.name, lang.id)
+        bar.addWidget(self.language_box)
         for text, fn in (("New script", self.new_script), ("Delete", self.delete_script)):
             b = QtWidgets.QPushButton(text)
             b.clicked.connect(lambda _=False, f=fn: f())
@@ -2021,7 +2028,7 @@ class ScriptsWindow(Floating):
             want = keep or self._open
             self.files.clear()
             for f in proj.scripts:
-                self.files.addItem(f.name + ".cs")
+                self.files.addItem(f.name + f.ext)
             names = self._names()
             if names:
                 self.files.setCurrentRow(names.index(want) if want in names else 0)
@@ -2039,8 +2046,13 @@ class ScriptsWindow(Floating):
     def _load(self, name):
         self._open = name
         f = self.studio.project.script_file(name) if name else None
-        self.editor.setEnabled(f is not None)
-        self.editor.setPlainText(f.text if f is not None else "")
+        busy, self._busy = self._busy, True                  # (changing the language re-colours the document, which Qt reports as a text change: with `_open` already the new
+        try:                                                 # file and the editor still holding the old one's text, that would write the old text into the new file)
+            self.editor.setEnabled(f is not None)
+            self.editor.set_language(f.language if f is not None else languages.DEFAULT)
+            self.editor.setPlainText(f.text if f is not None else "")
+        finally:
+            self._busy = busy
         self.editor.mark_errors({})
 
     def on_changed(self, kind):
@@ -2066,12 +2078,13 @@ class ScriptsWindow(Floating):
         self.studio.set_script_text(self._open, self.editor.toPlainText())
         self._show_status()
 
-    def new_script(self, name=None):
+    def new_script(self, name=None, language=None):
+        """A new script (in `language`, else the one picked in the toolbar), asking for its class name unless `name` is given. Returns the file."""
         if name is None:
             name = ask_text(self, "New script", "Class name:", "MyScript")
             if not name:
                 return None
-        f = self.studio.add_script(name)
+        f = self.studio.add_script(name, language=language or self.language_box.currentData())
         self.refresh(keep=f.name)
         return f
 
@@ -2163,7 +2176,7 @@ class ScriptsWindow(Floating):
             item.setData(Qt.UserRole, (d.script, d.line, d.col))
             item.setForeground(QtGui.QColor("#f48771" if d.severity == "error" else "#cca700"))
             self.problems.addItem(item)
-            if d.script == self._open and d.line:
+            if d.severity == "error" and d.script == self._open and d.line:          # (a warning is in the list, but is not a red line in the editor)
                 errors.setdefault(d.line, d.message)
         self.editor.mark_errors(errors)
         if not result.ok:

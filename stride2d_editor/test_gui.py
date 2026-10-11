@@ -10,7 +10,7 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 from PyQt5.QtCore import Qt
 from PyQt5.QtTest import QTest
 
-from . import asciiart, fileio
+from . import asciiart, fileio, languages
 from .demo import make_demo_project
 from .gui import Studio, create_windows
 from .model import Project
@@ -680,6 +680,118 @@ class CodeEditorWindow(Base):
         self.win.sprite_list.item(0).setCheckState(Qt.Checked)
         self.assertEqual(self.studio.project.sprites[self.win.sprite_box.currentIndex()].scripts, ["Teleporter"])
 
+    def test_new_scripts_in_each_language_have_their_template_class_extension_and_colouring(self):
+        for lang in languages.LANGUAGES.values():
+            self.win.new_script("Made_" + lang.id, language=lang.id)
+        proj = self.studio.project
+        self.assertEqual([f.language for f in proj.scripts], ["csharp", "cpp", "rust", "rpython"])
+        self.assertEqual(sorted(proj.script_classes()), sorted("Made_" + i for i in languages.LANGUAGES))      # attaching is by class name, whatever the language
+        self.assertEqual([self.win.files.item(i).text() for i in range(self.win.files.count())], ["Made_csharp.cs", "Made_cpp.cpp", "Made_rust.rs", "Made_rpython.py"])
+        for row, lang in enumerate(languages.LANGUAGES.values()):
+            self.win.files.setCurrentRow(row)                                                                  # picking a file puts its language into the editor
+            self.assertEqual(self.win.editor.language.id, lang.id)
+            self.assertEqual(self.win.editor.highlighter.language.id, lang.id)
+            self.assertEqual(self.win.editor.toPlainText(), lang.new_text("Made_" + lang.id))
+        self.assertEqual([f.language for f in Project.from_json(proj.to_json()).scripts], ["csharp", "cpp", "rust", "rpython"])
+        self.assertEqual([self.win.game_list.item(i).text() for i in range(self.win.game_list.count())], sorted(proj.script_classes()))
+
+    def test_the_toolbar_picks_the_language_a_new_script_is_in(self):
+        box = self.win.language_box
+        self.assertEqual([box.itemText(i) for i in range(box.count())], ["C#", "C++", "Rust", "RPython"])
+        self.assertEqual(self.win.new_script("First").language, "csharp")                                      # C# unless told
+        box.setCurrentIndex(box.findData("rust"))
+        self.assertEqual(self.win.new_script("Second").language, "rust")
+        self.assertEqual(self.win.new_script("Third", language="cpp").language, "cpp")                         # a language given wins over the toolbar's
+        self.assertEqual(self.studio.add_script("Fourth").language, "csharp")
+
+    def colour_at(self, block, col):
+        """The colour the highlighter gave column `col` of `block` (None: none)."""
+        for r in block.layout().formats():
+            if r.start <= col < r.start + r.length:
+                return r.format.foreground().color().name()
+        return None
+
+    def test_the_editor_colours_by_the_language_of_the_file(self):
+        ed, doc = self.win.editor, self.win.editor.document()
+        KEYWORD, TYPE, MARKER, COMMENT, STRING = "#c586c0", "#4ec9b0", "#dcdcaa", "#6a9955", "#ce9178"
+        ed.set_language("rpython")
+        ed.setPlainText("def f(self):  # note")
+        self.assertEqual(self.colour_at(doc.firstBlock(), 0), KEYWORD)
+        self.assertEqual(self.colour_at(doc.firstBlock(), 15), COMMENT)
+        ed.set_language("csharp")                                                                              # (the same text: def is no keyword of C#, and # starts no comment)
+        self.assertIsNone(self.colour_at(doc.firstBlock(), 0))
+        self.assertIsNone(self.colour_at(doc.firstBlock(), 15))
+        ed.set_language("rust")
+        ed.setPlainText("#[script(max_instances = 4)]\nfn main() { let x = 1; } // note")
+        self.assertEqual(self.colour_at(doc.firstBlock(), 3), MARKER)                                          # the attribute
+        self.assertEqual(self.colour_at(doc.firstBlock().next(), 0), KEYWORD)                                  # fn
+        self.assertEqual(self.colour_at(doc.firstBlock().next(), 25), COMMENT)
+        ed.set_language("cpp")
+        ed.setPlainText('#include "stride2d.h"\nSTRIDE_SCRIPT(16)\nclass A {};')
+        self.assertEqual(self.colour_at(doc.firstBlock(), 1), MARKER)                                          # the preprocessor line
+        self.assertEqual(self.colour_at(doc.firstBlock().next(), 0), TYPE)                                     # the marker
+        self.assertEqual(self.colour_at(doc.firstBlock().next().next(), 0), KEYWORD)
+        ed.set_language("rpython")
+        ed.setPlainText("@script(max_instances=4)\nclass A(object):\n    pass")
+        self.assertEqual(self.colour_at(doc.firstBlock(), 1), MARKER)                                          # the decorator
+        self.assertEqual(self.colour_at(doc.firstBlock().next(), 0), KEYWORD)
+        self.assertEqual(self.colour_at(doc.firstBlock().next(), 8), TYPE)                                     # object
+        # what runs over lines: /* */ in the C languages, triple quotes in Python (a string, not a comment), and not the other's
+        ed.set_language("rust")
+        ed.setPlainText("/* open\nstill\n*/ fn")
+        self.assertEqual([doc.findBlockByNumber(i).userState() for i in range(3)], [1, 1, 0])
+        self.assertEqual(self.colour_at(doc.findBlockByNumber(1), 0), COMMENT)
+        self.assertEqual(self.colour_at(doc.findBlockByNumber(2), 4), KEYWORD)
+        ed.set_language("rpython")
+        ed.setPlainText('s = """one\ntwo"""\nx = 1')
+        self.assertEqual([doc.findBlockByNumber(i).userState() for i in range(3)], [1, 0, 0])
+        self.assertEqual(self.colour_at(doc.findBlockByNumber(1), 0), STRING)
+        self.assertIsNone(self.colour_at(doc.findBlockByNumber(2), 0))
+        ed.setPlainText("/* not a comment here")
+        self.assertEqual(doc.firstBlock().userState(), 0)
+
+    def test_the_editor_indents_after_a_brace_or_in_python_after_a_colon(self):
+        ed = self.win.editor
+        cases = (("rust", "fn f() {", True), ("cpp", "void F() {", True), ("rpython", "def f(self):", True), ("rpython", "def f(self): {", False),
+                 ("rust", "fn f() -> i32 {", True), ("csharp", "void F():", False))
+        for n, (lang, text, indented) in enumerate(cases):
+            self.win.new_script("T%d" % n, language=lang)                                                      # (a file of that language is open: the editor takes its language from it)
+            self.assertEqual(ed.language.id, lang)
+            ed.setPlainText(text)
+            c = ed.textCursor()
+            c.movePosition(QtGui.QTextCursor.End)
+            ed.setTextCursor(c)
+            QTest.keyClick(ed, Qt.Key_Return)
+            self.assertEqual(ed.toPlainText(), text + "\n" + (" " * 4 if indented else ""), (lang, text))
+        self.win.new_script("TP", language="rpython")                                                          # (a } in Python does not dedent: it may close a dict)
+        ed.setPlainText("x = {\n    ")
+        c = ed.textCursor()
+        c.movePosition(QtGui.QTextCursor.End)
+        ed.setTextCursor(c)
+        QTest.keyClick(ed, Qt.Key_BraceRight)
+        self.assertEqual(ed.toPlainText(), "x = {\n    }")
+
+    def test_the_problems_list_shows_what_the_tool_said_and_a_warning_opens_its_file_at_its_line(self):
+        win = self.win
+        win.new_script("Plain")
+        win.new_script("Fancy", language="cpp")
+        win.files.setCurrentRow(0)                                                                             # (the C# file is the one open)
+        cmd, lib = win.builder.prepare(self.studio.project)
+        marker = languages.get("cpp").new_text("Fancy").split("\n").index("STRIDE_SCRIPT(16)") + 1
+        said = ("Fancy.cpp(%d,1): warning STRIDE0001: C++ scripts are not built yet: Fancy will not run\n"       # (what the tool says, and then the C# translator's error: a build that failed,
+                "Plain.cs(5,9): error CS1002: ; expected\n") % marker                                          #  without running one)
+        r = win._finished(lib, 1, said, win.signature())
+        texts = [win.problems.item(i).text() for i in range(win.problems.count())]
+        self.assertFalse(r.ok)
+        self.assertEqual(texts, ["Fancy:%d: warning STRIDE0001: C++ scripts are not built yet: Fancy will not run" % marker, "Plain:5: error CS1002: ; expected"])
+        self.assertEqual(win.editor.error_lines, {5: "; expected"})                                             # the error is a red line in the open file; the warning is not
+        win._goto_problem(win.problems.item(0))
+        self.assertEqual(win.files.currentRow(), 1)                                                            # the warning opens the file it is about...
+        self.assertEqual(win.editor.language.id, "cpp")
+        self.assertEqual(win.editor.textCursor().blockNumber() + 1, marker)                                    # ...at the line of its marker
+        self.assertEqual(win.editor.textCursor().block().text(), "STRIDE_SCRIPT(16)")
+        self.assertEqual(win.editor.error_lines, {})                                                           # (the red line was of the other file)
+
     def test_a_script_outside_the_subset_is_a_problem_at_its_line_and_the_old_engine_stays(self):
         from .engine import find_library
         if find_library() is None:
@@ -757,3 +869,60 @@ class BuildAndReload(Base):
         # a library built without it says so instead of running nothing silently
         win.builder.forget_old(r.lib)
         vc.close()
+
+    def native_mover(lang, name, x):
+        """A script in `lang` that puts its node at (x, 0) every frame."""
+        if lang == "cpp":
+            return '#include "stride2d.h"\nSTRIDE_SCRIPT(4)\nclass %s {\npublic:\n    int node;\n    void Update() { SetPos(node, %sf, 0.0f); }\n};\n' % (name, float(x))
+        if lang == "rust":
+            return "#[script(max_instances = 4)]\nstruct %s { node: i32 }\nimpl %s {\n    fn update(&mut self) { set_pos(self.node, %s, 0.0); }\n}\n" % (name, name, float(x))
+        return ("from stride2d import script\n\n@script(max_instances=4)\nclass %s:\n    def __init__(self):\n        self.node: int = 0\n\n    def update(self):\n"
+                "        set_pos(self.node, %s, 0.0)\n" % (name, float(x)))
+    native_mover = staticmethod(native_mover)
+
+    def test_scripts_in_every_language_are_built_into_the_engine_and_run(self):
+        from .engine import find_library
+        if find_library() is None:
+            self.skipTest("libstride2d.so is not built (python3 tools/engine_so.py)")
+        win, vc = self.windows["scripts"], self.main.viewport
+        win.new_script("Teleporter")
+        win.editor.setPlainText(MOVER)
+        movers = [("cpp", "Mover_cpp", -501.0), ("rust", "Mover_rust", -502.0), ("rpython", "Mover_rpython", -503.0),
+                  ("cpp", "Mover_cpp2", -504.0), ("rust", "Mover_rust2", -505.0), ("rpython", "Mover_rpython2", -506.0)]      # (two of a language: their helpers are named alike)
+        for lang, name, x in movers:
+            win.new_script(name, language=lang)
+            win.editor.setPlainText(self.native_mover(lang, name, x))
+        vc.open()
+        if vc.vp is None or not vc.vp.is_open:
+            self.skipTest("no display for the engine's window: " + "; ".join(self.boxes))
+        r = win.build(sync=True)
+        self.assertTrue(r.ok, [str(d) for d in r.diagnostics])
+        self.assertEqual(r.diagnostics, [])                                          # (nothing is left out unmentioned, and nothing needs mentioning)
+        self.assertEqual(set(r.scripts), {"Teleporter"} | {name for _l, name, _x in movers})
+        self.assertEqual(sorted(r.scripts.values()), list(range(7)))
+        self.assertEqual(win.status.text(), "built: 7 script classes")
+        lib = vc.engine.lib
+        for name, expect in [("Teleporter", -500.0)] + [(name, x) for _l, name, x in movers]:
+            node = lib.p2d_new_node()
+            self.assertEqual(lib.p2d_attach_script(node, r.scripts[name]), 1, name)
+            for _ in range(3):
+                lib.p2d_step(1 / 60.0)
+            self.assertAlmostEqual(lib.p2d_node_x(node), expect, 2, name)            # each script ran, on its own node
+        win.builder.forget_old(r.lib)
+        vc.close()
+
+    def test_a_native_script_that_does_not_build_is_a_problem_at_its_line_in_its_file(self):
+        from .engine import find_library
+        if find_library() is None:
+            self.skipTest("libstride2d.so is not built (python3 tools/engine_so.py)")
+        win = self.windows["scripts"]
+        for lang, bad, where in (("rust", "#[script(max_instances = 4)]\nstruct Bad { node: i32 }\nimpl Bad {\n    fn update(&mut self) {\n        let x: i32 = ;\n    }\n}\n", 5),
+                                 ("rpython", "@script(max_instances=4)\nclass Bad:\n    def __init__(self):\n        self.node: int = 0\n\n    def update(self):\n        x = = 3\n", 7)):
+            win.new_script("Bad", language=lang)
+            win.editor.setPlainText(bad)
+            r = win.build(sync=True)
+            self.assertFalse(r.ok)
+            errors = [(d.script, d.line, d.severity) for d in r.diagnostics if d.severity == "error"]
+            self.assertEqual(errors, [("Bad", where, "error")], lang)
+            self.assertEqual(win.editor.error_lines.keys(), {where}, lang)           # a red line in the file that is open
+            self.studio.delete_script("Bad")

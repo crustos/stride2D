@@ -9,6 +9,8 @@ import unittest
 
 from .demo import make_demo_project
 from .slime_demo import SlimeDriver, make_slime_project
+from .slime_rust import make_slime_rust_project
+from . import scriptbuild
 from .engine import (BODY_DYNAMIC, BODY_STATIC, BTN_LEFT, EV_MOUSE_DOWN, EV_WHEEL, KEY_HOME, Engine, EngineError, Viewport, find_library, floats_ptr)
 
 W, H = 800, 480           # the renderer's picture is made once per process, at the size it is first started with
@@ -55,7 +57,7 @@ class EngineApi(unittest.TestCase):
         return n
 
     def test_version_and_the_exports_the_header_promises(self):
-        self.assertEqual(self.e.p2d_version(), 7)
+        self.assertEqual(self.e.p2d_version(), 8)
         header = os.path.join(os.path.dirname(_engine.path), "libstride2d.h")
         if os.path.exists(header):
             import re
@@ -431,6 +433,293 @@ class SlimeJumpDestructInTheViewport(unittest.TestCase):
             self.assertFalse(project.dirty)                                            # and playing (the blinking eyes) is not an edit
         finally:
             vp.close()
+
+
+class SlimeJumpInRust(unittest.TestCase):
+    """SlimeJump (slime_rust.py): its game logic is the Rust scripts of samples/SlimeJumpRust (walking, climbing, the blaster and the lasso, turrets and arrows, crumbly platforms,
+    checkpoints, gems, and a bot), built into the engine by the editor's own Build and played in the viewport. The level is 84 x 16 cells; the ground is at y = 4."""
+    SPAWN = (3.5, 4.4)
+
+    @classmethod
+    def setUpClass(cls):
+        if find_library() is None:
+            raise unittest.SkipTest("libstride2d.so is not built (python3 tools/engine_so.py)")
+        import tempfile
+        cls.work = tempfile.TemporaryDirectory()
+        cls.project = make_slime_rust_project()
+        cls.result = scriptbuild.Builder(cls.work.name).build(cls.project)
+        if not cls.result.ok:
+            raise AssertionError("the Rust scripts did not build: " + "; ".join(str(d) for d in cls.result.diagnostics))
+        try:
+            cls.engine = Engine(cls.result.lib)
+            cls.engine.start(W, H)
+        except EngineError as e:
+            raise unittest.SkipTest(str(e))
+
+    @classmethod
+    def tearDownClass(cls):
+        # (the engine is not stopped: shutting a second copy of the library down takes the process's EGL display with it, and the other classes' engine draws on it)
+        if getattr(cls, "work", None) is not None:
+            cls.work.cleanup()
+
+    def setUp(self):
+        self.vp = Viewport(self.engine, self.project, W, H)
+        self.vp.show_level(self.project.levels[0])
+        try:
+            self.vp.open()
+        except EngineError as e:
+            self.skipTest(str(e))
+        self.vp.toggle_play()
+        self.lib = self.engine.lib
+        self.tick(30)                                                                  # (the slime lands)
+        self.slime = self.node_with_tag(1)
+        self.assertIsNotNone(self.slime)
+
+    def tearDown(self):
+        self.lib.p2d_clear_input()
+        self.aim(0.0, 0.0, 0)
+        self.vp.close()
+
+    def tick(self, n=1):
+        for _ in range(n):
+            self.vp.tick(1 / 60.0)
+
+    def node_with_tag(self, tag):
+        return next((n for n in range(self.lib.p2d_node_slots()) if self.lib.p2d_get_tag(n) == tag), None)
+
+    def worm_near(self, x):
+        """The worm (tag 2) that crawls about x."""
+        lib = self.lib
+        return next((n for n in range(lib.p2d_node_slots()) if lib.p2d_get_tag(n) == 2 and abs(lib.p2d_node_x(n) - x) < 4.0), None)
+
+    def aim(self, x, y, buttons=0):
+        """Where the mouse is (a world point) and which buttons are held (bit 0 left, 2 right)."""
+        self.vp.screen_to_world = lambda px, py: (x, y)
+        self.vp._buttons = buttons
+
+    def glob(self, i):
+        return self.lib.p2d_get_global(i)
+
+    def node_at(self, x, y, reach=0.6):
+        """The node of the cell centred at (x, y) (reach: how far from it it may be, for a worm that crawls)."""
+        lib = self.lib
+        return next((n for n in range(lib.p2d_node_slots()) if lib.p2d_node_alive(n) and abs(lib.p2d_node_x(n) - x) < reach and abs(lib.p2d_node_y(n) - y) < 0.6 and n != self.slime), None)
+
+    def pos(self, n=None):
+        n = self.slime if n is None else n
+        return self.lib.p2d_node_x(n), self.lib.p2d_node_y(n)
+
+    def teleport(self, x, y, vx=0.0, vy=0.0):
+        self.lib.p2d_set_pos(self.slime, x, y)
+        self.lib.p2d_set_velocity(self.slime, vx, vy)
+
+    def assertAtStart(self):
+        x, y = self.pos()
+        self.assertAlmostEqual(x, self.SPAWN[0], 1)
+        self.assertLess(abs(y - self.SPAWN[1]), 0.5)
+        self.assertEqual(self.lib.p2d_get_tag(self.slime), 1)                          # (and well again)
+
+    def test_the_rust_scripts_were_built_and_attached(self):
+        self.assertEqual(sorted(self.result.scripts), sorted(("Slime", "Worm", "Spikes", "Gem", "Goal", "Bullet", "Arrow", "Turret", "Crumbly", "Vine", "Anchor", "Save", "Bot")))
+        self.assertEqual(self.result.diagnostics, [])
+        self.assertIn("32 scripts running", self.vp.script_report)
+        x, y = self.pos()
+        self.assertAlmostEqual(x, self.SPAWN[0], 1)
+        self.assertAlmostEqual(y, self.SPAWN[1], 1)                                    # it stands on the ground
+
+    def test_the_slime_walks_and_jumps_as_high_as_the_key_is_held(self):
+        lib = self.lib
+        lib.p2d_set_key(262, 1)                                                        # right arrow
+        self.tick(30)
+        self.assertGreater(self.pos()[0], self.SPAWN[0] + 3.0)
+        lib.p2d_set_key(262, 0)
+        lib.p2d_set_key(65, 1)                                                         # A: left
+        self.tick(30)
+        lib.p2d_set_key(65, 0)
+        self.assertLess(self.pos()[0], self.SPAWN[0] + 2.0)
+        apex = {}
+        for name, frames in (("full", 40), ("hop", 3)):
+            self.teleport(self.SPAWN[0], self.SPAWN[1])
+            self.tick(60)
+            lib.p2d_set_key(32, 1)
+            top = 0.0
+            for i in range(60):
+                self.tick(1)
+                if i == frames:
+                    lib.p2d_set_key(32, 0)
+                top = max(top, self.pos()[1] - self.SPAWN[1])
+            lib.p2d_set_key(32, 0)
+            apex[name] = top
+        self.assertGreater(apex["full"], 3.5)
+        self.assertLess(apex["hop"], apex["full"] - 1.0)                               # let go early and it is a hop
+        self.assertLess(apex["full"], 5.0)                                             # (and no second jump in the air)
+
+    def test_spikes_a_fall_and_a_worm_from_the_side_send_it_back_to_the_start(self):
+        self.teleport(7.5, 4.5)                                                        # on the spikes
+        self.tick(5)
+        self.assertAtStart()
+        self.teleport(21.5, 6.0)                                                       # over the pit
+        self.tick(150)
+        self.assertAtStart()
+        worm = self.worm_near(15.5)
+        self.assertIsNotNone(worm)
+        wx, wy = self.pos(worm)
+        self.teleport(wx - 0.6, wy + 0.1)                                              # beside the worm
+        self.tick(5)
+        self.assertAtStart()
+        self.assertEqual(self.lib.p2d_node_alive(worm), 1)                             # (it is not hurt by that)
+        self.assertEqual(self.glob(0), 3)                                              # three deaths so far
+
+    def test_a_slime_that_lands_on_a_worm_squashes_it_and_bounces(self):
+        worm = self.worm_near(15.5)
+        wx, wy = self.pos(worm)
+        self.teleport(wx, wy + 1.1, 0.0, -4.0)
+        top = -1e9
+        for _ in range(20):
+            self.tick(1)
+            top = max(top, self.pos()[1])
+        self.assertEqual(self.lib.p2d_node_alive(worm), 0)
+        self.assertGreater(top, wy + 1.5)
+        self.assertEqual(self.lib.p2d_get_tag(self.slime), 1)
+
+    def test_a_gem_is_picked_up_and_kept_at_the_next_checkpoint_or_back_if_the_slime_dies_first(self):
+        self.lib.p2d_destroy_node(self.worm_near(15.5))                                # (the worm would hurt it by the gem)
+        gem = self.node_at(16.5, 4.5)
+        self.assertIsNotNone(gem)
+        self.teleport(16.5, 4.5)
+        self.tick(3)
+        self.assertLess(self.pos(gem)[1], -50)                                         # gone from the level (far below it)
+        self.assertEqual(self.glob(4), 1)
+        self.teleport(7.5, 4.5)                                                        # dies on the spikes: the gem is back
+        self.tick(5)
+        self.assertGreater(self.pos(gem)[1], 0)
+        self.assertEqual(self.glob(4), 0)
+        self.teleport(16.5, 4.5)
+        self.tick(3)
+        self.assertEqual(self.glob(4), 1)
+        self.teleport(26.5, 4.5)                                                       # a checkpoint: kept
+        self.tick(5)
+        self.assertEqual(self.glob(1), 1)
+        self.tick(40)                                                                  # (a respawn pause is over)
+        self.teleport(7.5, 4.5)
+        self.tick(5)
+        self.assertLess(self.pos(gem)[1], -50)
+        self.assertEqual(self.glob(4), 1)
+        x, y = self.pos()
+        self.assertAlmostEqual(x, 26.5, 1)                                             # and it starts again from the checkpoint
+
+    def test_climbing_the_vines_up_the_wall(self):
+        lib = self.lib
+        lib.p2d_destroy_node(self.node_at(47.5, 4.5))                                  # (the turret, which would shoot it)
+        self.teleport(50.5, 4.4)
+        lib.p2d_set_key(262, 1)                                                        # right, up to the wall, and jump (climb)
+        lib.p2d_set_key(32, 1)
+        top = 0.0
+        for _ in range(120):
+            self.tick(1)
+            top = max(top, self.pos()[1])
+            if self.glob(16) > 0.5:
+                break
+        self.assertEqual(self.glob(16), 1)                                             # climbing
+        for _ in range(120):
+            self.tick(1)
+            top = max(top, self.pos()[1])
+        self.assertGreater(top, 12.0)                                                  # it went up the whole wall (eight units) ...
+        self.assertGreater(self.pos()[0], 52.0)                                        # ... and over the lip
+
+    def test_the_blaster_shoots_a_worm(self):
+        worm = self.worm_near(15.5)
+        self.teleport(10.5, 4.4)
+        self.tick(5)
+        wx, wy = self.pos(worm)
+        self.aim(wx, wy, 1)                                                            # left button: shoot at the pointer
+        seen = False
+        for _ in range(60):
+            self.tick(1)
+            seen = seen or self.node_with_tag(6) is not None
+            if not self.lib.p2d_node_alive(worm):
+                break
+            wx, wy = self.pos(worm)
+            self.aim(wx, wy, 1)
+        self.assertTrue(seen)                                                          # (there was a bullet)
+        self.assertEqual(self.lib.p2d_node_alive(worm), 0)
+
+    def test_the_lasso_catches_an_anchor_swings_and_lets_go(self):
+        lib = self.lib
+        self.teleport(58.4, 12.4)
+        self.tick(10)
+        self.aim(65.5, 13.5, 4)                                                        # right button: throw it at the anchor
+        for _ in range(40):
+            self.tick(1)
+            if self.glob(18) > 0.5:
+                break
+        self.assertEqual(self.glob(18), 1)                                             # attached
+        self.teleport(61.5, 11.0)                                                      # (it steps off the edge: it hangs and swings below the anchor)
+        low = 99.0
+        for _ in range(45):
+            self.tick(1)
+            low = min(low, self.pos()[1])
+        self.assertLess(low, 9.0)
+        self.assertGreater(self.pos()[1], 6.0)                                         # (the rope holds it)
+        rope = [n for n in range(lib.p2d_node_slots()) if lib.p2d_node_alive(n) and lib.p2d_node_active(n) and lib.p2d_sprite_info(n, 1) > 3.0]
+        self.assertTrue(rope)                                                          # (and the rope is drawn: a long thin sprite)
+        self.aim(65.5, 13.5, 0)
+        self.tick(3)
+        self.assertEqual(self.glob(18), 0)                                             # let go
+
+    def test_a_turret_shoots_arrows_that_hurt(self):
+        self.teleport(42.5, 4.4)
+        arrow = None
+        for _ in range(100):
+            self.tick(1)
+            arrow = self.node_with_tag(4)
+            if arrow is not None:
+                break
+        self.assertIsNotNone(arrow)
+        x0 = self.pos(arrow)[0]
+        self.tick(5)
+        self.assertLess(self.pos(arrow)[0], x0)                                        # toward the slime
+        deaths = self.glob(0)
+        self.tick(90)                                                                  # standing still, it is hit
+        self.assertGreater(self.glob(0), deaths)
+
+    def test_a_crumbly_platform_dissolves_after_the_slime_has_stood_on_it(self):
+        lib = self.lib
+        crumbly = self.node_at(33.5, 3.5)
+        self.assertIsNotNone(crumbly)
+        self.teleport(33.5, 4.4)
+        self.tick(50)
+        self.assertGreater(self.pos(crumbly)[1], 0)                                    # (not yet)
+        self.tick(30)
+        self.assertLess(self.pos(crumbly)[1], -50)
+        self.tick(120)                                                                 # it falls into the pit and is back at the start
+        self.assertAtStart()
+        self.assertGreater(self.pos(crumbly)[1], 0)
+
+    def test_a_checkpoint_is_where_it_comes_back_to(self):
+        self.teleport(26.5, 4.5)
+        self.tick(5)
+        self.assertEqual(self.glob(1), 1)
+        self.teleport(21.5, 6.0)                                                       # falls into the pit
+        self.tick(150)
+        x, y = self.pos()
+        self.assertAlmostEqual(x, 26.5, 1)
+        self.assertEqual(self.glob(0), 1)
+
+    def test_the_bot_plays_the_whole_level_to_the_goal(self):
+        lib = self.lib
+        goal = self.node_at(80.5, 12.5)
+        self.assertIsNotNone(goal)
+        self.assertNotEqual(lib.p2d_get_tag(goal), 99)
+        lib.p2d_set_global(6, 1.0)                                                     # (the T key does that)
+        for frame in range(60 * 60):
+            self.tick(1)
+            if lib.p2d_get_tag(goal) == 99:
+                break
+        self.assertEqual(lib.p2d_get_tag(goal), 99, "stopped at %s, %d deaths" % (self.pos(), self.glob(0)))
+        self.assertEqual(self.glob(5), 1)
+        self.assertGreaterEqual(self.glob(4), 3)                                       # gems on the way
+        self.assertGreaterEqual(self.glob(1), 2)                                       # both checkpoints
 
 
 if __name__ == "__main__":

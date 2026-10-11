@@ -16,10 +16,12 @@ import copy
 import json
 import re
 
+from . import languages
 from .lights import DEFAULT_LIGHTING, clean_light, clean_lighting
 
 FORMAT = "stride2d-project"
-VERSION = 1
+VERSION = 2                    # the newest this editor reads. 1: no script languages. 2: a script may say "language"; a project is written as 2 only when one does,
+                               # so that an editor older than the languages refuses it rather than read a Rust script as C#
 TRANSPARENT_KEY = "."
 MAX_PALETTE = 256            # an index fits a byte
 MAX_SPRITE_SIDE = 256
@@ -418,41 +420,29 @@ def _lights_from_json(item, where):
     return out, lighting
 
 
-SCRIPT_CLASS = re.compile(r"\[\s*Script\b[^\]]*\]\s*(?:\[[^\]]*\]\s*)*(?:(?:public|internal)\s+)?(?:sealed\s+)?class\s+(\w+)")
-
-SCRIPT_TEMPLATE = """using System;
-using Stride2D;
-
-// A script: C# that runs on a node while the level plays.
-// Keep to the C# subset (no lambdas, try/catch, ...): Build says where a line does not fit.
-// Callbacks: Start, Update, FixedUpdate, LateUpdate, OnEnable, OnDisable,
-//   OnCollisionBegin2D(Collision2D hit), OnCollisionEnd2D(Collision2D hit),
-//   OnTriggerEnter2D(Collider2D other), OnTriggerStay2D, OnTriggerExit2D.
-// Input: Input2D.Key(Input2D.Left), Input2D.Key('A'), Input2D.MouseX, Input2D.MouseDown(0).
-[Script, MaxInstances(16)]
-class %(name)s
-{
-    public Component Self;
-    public float Time;
-
-    public void Update()
-    {
-        Time += 1f / 60f;
-        // Self.Node.SetPosition(Self.Node.WorldX() + 0.02f, Self.Node.WorldY());
-    }
-}
-"""
+SCRIPT_CLASS = languages.CSHARP_CLASS              # (kept for what imported them; the per-language ones are in languages.py)
+SCRIPT_TEMPLATE = languages.CSHARP_TEMPLATE
 
 
 class ScriptFile:
-    """A C# file of the project (written to the build folder as <name>.cs). The classes marked [Script] in it are what sprites and the game attach by name."""
+    """A script file of the project, in one language (languages.py), written to the build folder as <name><the language's extension>. The classes marked as scripts in it
+    (each language has its own marker) are what sprites and the game attach by name."""
 
-    def __init__(self, name, text=""):
+    def __init__(self, name, text="", language=languages.DEFAULT):
         self.name = name
         self.text = text
+        self.language = languages.get(language).id        # (UnknownLanguage, a ValueError, if there is no such language)
+
+    @property
+    def lang(self):
+        return languages.get(self.language)
+
+    @property
+    def ext(self):
+        return self.lang.ext
 
     def classes(self):
-        return SCRIPT_CLASS.findall(re.sub(r"//[^\n]*", "", self.text))
+        return self.lang.classes(self.text)
 
 
 class Project:
@@ -463,6 +453,7 @@ class Project:
         self.tiles = {}                 # emoji -> TileDef (insertion order is the tile palette's order)
         self.levels = []
         self.scripts = []               # ScriptFile: the project's C# (the editor's code editor; Build compiles them into the engine)
+        self.backdrop = ""              # the name of a backdrop the viewport draws behind the tiles (scenery.py), or none
         self.game_scripts = []          # script class names that run once, on a node of the game itself, whenever a level plays
         self.empty = DEFAULT_EMPTY      # what an empty cell is written as when a level is exported as text
         self.path = None                # the file it was loaded from or saved to
@@ -560,16 +551,28 @@ class Project:
     def to_json(self):
         return {
             "format": FORMAT,
-            "version": VERSION,
+            "version": self.file_version(),
             "name": self.name,
             "palette": self.palette.to_json(),
             "sprites": [s.to_json(self.palette) for s in self.sprites],
             "empty": self.empty,
             "tiles": [t.to_json() for t in self.tiles.values()],
             "levels": [self._level_json(l) for l in self.levels],
-            **({"scripts": [{"name": f.name, "text": f.text} for f in self.scripts]} if self.scripts else {}),
+            **({"scripts": [self._script_json(f) for f in self.scripts]} if self.scripts else {}),
+            **({"backdrop": self.backdrop} if self.backdrop else {}),
             **({"game_scripts": list(self.game_scripts)} if self.game_scripts else {}),
         }
+
+    def file_version(self):
+        """What version this project is written as: 2 when a script is in a language other than C#, else 1 (so a project of C# scripts still opens in an editor that has no languages)."""
+        return VERSION if any(f.language != languages.DEFAULT for f in self.scripts) else 1
+
+    @staticmethod
+    def _script_json(f):
+        d = {"name": f.name, "text": f.text}
+        if f.language != languages.DEFAULT:
+            d["language"] = f.language
+        return d
 
     def _level_json(self, l):
         d = {"name": l.name, "rows": ["".join(l.get(x, y) or self.empty for x in range(l.width)) for y in range(l.height)]}
@@ -600,8 +603,12 @@ class Project:
                                           bool(item.get("dynamic", False)), bool(item.get("diggable", False)))
         for n, item in enumerate(data.get("scripts", [])):
             if not isinstance(item, dict) or "name" not in item:
-                raise ProjectError("scripts[%d]: expected {name, text}" % n)
-            p.scripts.append(ScriptFile(str(item["name"]), str(item.get("text", ""))))
+                raise ProjectError("scripts[%d]: expected {name, text, language}" % n)
+            try:
+                p.scripts.append(ScriptFile(str(item["name"]), str(item.get("text", "")), item.get("language", languages.DEFAULT)))
+            except languages.UnknownLanguage as e:
+                raise ProjectError("scripts[%d]: %s" % (n, e))
+        p.backdrop = str(data.get("backdrop", ""))
         p.game_scripts = [str(n) for n in data.get("game_scripts", [])]
         for n, item in enumerate(data.get("levels", [])):
             where = "levels[%d]" % n

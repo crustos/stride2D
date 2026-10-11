@@ -1,14 +1,12 @@
-"""The parts of the code editor: a plain-text editor with line numbers, a current-line highlight, auto-indent, Tab as spaces and C# colouring. No project knowledge here."""
+"""The parts of the code editor: a plain-text editor with line numbers, a current-line highlight, auto-indent, Tab as spaces and colouring for the script languages
+(languages.py: C#, C++, Rust, RPython). No project knowledge here."""
 import re
 
 from PyQt5 import QtCore, QtGui, QtWidgets
 from PyQt5.QtCore import Qt
 
-KEYWORDS = ("abstract as base bool break byte case catch char checked class const continue decimal default delegate do double else enum event explicit extern false finally "
-            "fixed float for foreach goto if implicit in int interface internal is lock long namespace new null object operator out override params private protected public "
-            "readonly ref return sbyte sealed short sizeof static string struct switch this throw true try typeof uint ulong unchecked unsafe ushort using var virtual void "
-            "volatile while").split()
-TYPES = "Component Node Scene2D Rigidbody2D Collider2D Collision2D Input2D Script MaxInstances Console Math Mathf".split()
+from . import languages
+from .languages import CSHARP_KEYWORDS as KEYWORDS, CSHARP_TYPES as TYPES        # (kept for what imported them)
 
 
 def _fmt(color, bold=False, italic=False):
@@ -20,39 +18,57 @@ def _fmt(color, bold=False, italic=False):
     return f
 
 
-class CSharpHighlighter(QtGui.QSyntaxHighlighter):
-    """Keywords, the engine's types, numbers, strings and comments (// and a /* */ that runs over lines)."""
+class ScriptHighlighter(QtGui.QSyntaxHighlighter):
+    """Colours a script by its language: keywords, the engine's types, numbers, the language's own markers (attributes, decorators, preprocessor lines), strings and comments
+    (a line comment, and a block that runs over lines: /* */, or Python's triple quotes). All of it comes from the Language (languages.py)."""
 
-    def __init__(self, doc):
+    def __init__(self, doc, language=languages.DEFAULT):
         super().__init__(doc)
-        self.rules = [(re.compile(r"\b(%s)\b" % "|".join(KEYWORDS)), _fmt("#c586c0", True)),
-                      (re.compile(r"\b(%s)\b" % "|".join(TYPES)), _fmt("#4ec9b0")),
-                      (re.compile(r"\b\d+(\.\d+)?f?\b"), _fmt("#b5cea8")),
-                      (re.compile(r"\[[A-Za-z_][^\]\n]*\]"), _fmt("#dcdcaa")),
-                      (re.compile(r'"(\\.|[^"\\])*"'), _fmt("#ce9178")),
-                      (re.compile(r"'(\\.|[^'\\])*'"), _fmt("#ce9178")),
-                      (re.compile(r"//[^\n]*"), _fmt("#6a9955", italic=True))]
         self.comment = _fmt("#6a9955", italic=True)
+        self.set_language(language, rehighlight=False)
+
+    def set_language(self, language, rehighlight=True):
+        lang = languages.get(language)
+        self.language = lang
+        rules = [(re.compile(r"\b(%s)\b" % "|".join(lang.keywords)), _fmt("#c586c0", True)),
+                 (re.compile(r"\b(%s)\b" % "|".join(lang.types)), _fmt("#4ec9b0")),
+                 (re.compile(lang.number), _fmt("#b5cea8"))]
+        rules += [(re.compile(rx), _fmt(color)) for rx, color in lang.extra]
+        rules += [(re.compile(r'"(\\.|[^"\\])*"'), _fmt("#ce9178")),
+                  (re.compile(lang.char_pattern), _fmt("#ce9178")),
+                  (re.compile(re.escape(lang.line_comment) + r"[^\n]*"), self.comment)]
+        self.rules = rules
+        self.block = lang.block
+        self.block_fmt = _fmt("#ce9178") if lang.block_is_string else self.comment
+        if rehighlight:
+            self.rehighlight()
 
     def highlightBlock(self, text):
         for rx, fmt in self.rules:
             for m in rx.finditer(text):
                 self.setFormat(m.start(), m.end() - m.start(), fmt)
-        # /* ... */ over lines: state 1 = still inside
+        # a block over lines: state 1 = still inside
         self.setCurrentBlockState(0)
-        pos = 0
-        if self.previousBlockState() != 1:
-            m = re.search(r"/\*", text)
-            pos = m.start() if m else -1
+        if self.block is None:
+            return
+        opener, closer = self.block
+        inside = self.previousBlockState() == 1
+        pos = 0 if inside else text.find(opener)
         while pos >= 0:
-            end = text.find("*/", pos + (0 if self.previousBlockState() == 1 and pos == 0 else 2))
+            end = text.find(closer, pos + (0 if inside and pos == 0 else len(opener)))
             if end < 0:
                 self.setCurrentBlockState(1)
-                self.setFormat(pos, len(text) - pos, self.comment)
+                self.setFormat(pos, len(text) - pos, self.block_fmt)
                 break
-            self.setFormat(pos, end + 2 - pos, self.comment)
-            m = re.search(r"/\*", text[end + 2:])
-            pos = end + 2 + m.start() if m else -1
+            self.setFormat(pos, end + len(closer) - pos, self.block_fmt)
+            pos = text.find(opener, end + len(closer))
+
+
+class CSharpHighlighter(ScriptHighlighter):
+    """(the highlighter before there were languages)"""
+
+    def __init__(self, doc):
+        super().__init__(doc, "csharp")
 
 
 class _Gutter(QtWidgets.QWidget):
@@ -68,18 +84,20 @@ class _Gutter(QtWidgets.QWidget):
 
 
 class CodeEditor(QtWidgets.QPlainTextEdit):
-    """QPlainTextEdit with line numbers, Tab = 4 spaces (Shift+Tab takes them back), auto-indent (and a `}` lines up with its `{`), and marks for lines with errors."""
+    """QPlainTextEdit with line numbers, Tab = 4 spaces (Shift+Tab takes them back), auto-indent (after a `{`, or a `:` in Python; and a `}` lines up with its `{`), colouring
+    for its language, and marks for lines with errors."""
     INDENT = "    "
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, language=languages.DEFAULT):
         super().__init__(parent)
+        self.language = languages.get(language)
         font = QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.FixedFont)
         font.setPointSize(10)
         self.setFont(font)
         self.setLineWrapMode(QtWidgets.QPlainTextEdit.NoWrap)
         self.setTabStopDistance(4 * QtGui.QFontMetricsF(font).horizontalAdvance(" "))
         self.setStyleSheet("QPlainTextEdit { background: #1e1e1e; color: #d4d4d4; selection-background-color: #264f78; }")
-        self.highlighter = CSharpHighlighter(self.document())
+        self.highlighter = ScriptHighlighter(self.document(), self.language.id)
         self.gutter = _Gutter(self)
         self.error_lines = {}                       # line (1-based) -> message
         self.blockCountChanged.connect(self._update_width)
@@ -87,6 +105,13 @@ class CodeEditor(QtWidgets.QPlainTextEdit):
         self.cursorPositionChanged.connect(self._highlight_line)
         self._update_width()
         self._highlight_line()
+
+    def set_language(self, language):
+        """Colours (and indents) as `language` ("csharp", "cpp", "rust", "rpython")."""
+        lang = languages.get(language)
+        if lang is not self.language:
+            self.language = lang
+            self.highlighter.set_language(lang.id)
 
     # ---- the gutter
     def gutter_width(self):
@@ -177,12 +202,12 @@ class CodeEditor(QtWidgets.QPlainTextEdit):
             line = cur.block().text()
             before = line[:cur.positionInBlock()]
             indent = re.match(r"\s*", line).group(0)
-            if before.rstrip().endswith("{"):
+            if before.rstrip().endswith(self.language.indent_after):
                 indent += self.INDENT
             cur.insertText("\n" + indent)
             self.ensureCursorVisible()
             return
-        if key == Qt.Key_BraceRight and not cur.hasSelection():
+        if key == Qt.Key_BraceRight and not cur.hasSelection() and self.language.indent_after == "{":
             line = cur.block().text()
             if line.strip() == "" and len(line) >= len(self.INDENT) and line.endswith(self.INDENT):
                 cur.movePosition(QtGui.QTextCursor.StartOfBlock)
